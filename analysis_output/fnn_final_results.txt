@@ -1,0 +1,4 @@
+✓ Ensemble NN training completed successfully!
+  Results keys: ['history', 'n_parameters', 'validation_size', 'n_train_samples', 'n_val_samples', 'train_losses', 'val_losses', 'final_val_loss']
+  Number of parameters: 112970
+  Final validation loss: 0.022187713533639908
