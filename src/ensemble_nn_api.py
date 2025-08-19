@@ -162,8 +162,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         if self.seed is not None:
             set_seeds(self.seed)
 
-        self._pretransform()
         self._prefit()
+        self._pretransform()
+        
         
         train_loaders, val_loaders = create_data_loaders(
             self.features_and_targets,
