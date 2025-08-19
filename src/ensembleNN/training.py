@@ -11,7 +11,7 @@ from tqdm import tqdm
 import logging
 import copy
 
-from .model import EnsembleFactorNN
+from .model import EnsembleNN
 
 
 logger = logging.getLogger(__name__)
@@ -26,48 +26,31 @@ class PinballLoss(nn.Module):
         super().__init__()
         self.quantiles = quantiles
 
-    def forward(self, predictions: torch.Tensor, targets: torch.Tensor,  ensemble: bool = False) -> torch.Tensor:
-        """Compute pinball loss.
-        
-        Args:
-            predictions: Shape (batch_size, n_quantiles, n_horizons)
-            targets: Shape (batch_size, n_horizons)
-            
-        Returns:
-            Scalar loss
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor, ensemble: bool = False) -> torch.Tensor:
         """
+        Pinball loss (a.k.a. quantile loss), vectorized.
 
-        if ensemble:
+        Args:
+            predictions: (E, B, Q, H) if ensemble=True, else (B, Q, H)
+            targets:     (B, H) or (B, Q, H)
+        Returns:
+            Scalar loss (mean over ensemble, batch, quantiles, horizons)
+        """
+        E, B, Q, H = predictions.shape
 
-            ensemble_size, batch_size, n_quantiles, n_horizons = predictions.shape
-        else:
-            ensemble_size = 1
-            n_quantiles, n_horizons = predictions.shape[1], predictions.shape[2]
-            # expand predictions to match ensemble size
-            predictions = predictions.unsqueeze(0).expand(ensemble_size,-1, -1, -1)
-        
-        
-        # Expand targets to match predictions shape
-        #targets_expanded = targets.unsqueeze(1).expand(-1, n_quantiles, -1)
-        
-        # expand 
-        total_loss = 0.0
-        
-        for e_idx in range(ensemble_size):
-            for q_idx, quantile in enumerate(self.quantiles):
-                for h_idx in range(n_horizons):
-                    pred_qh = predictions[e_idx, :, q_idx, h_idx]
-                    target_qh = targets[:, q_idx, h_idx]
-                    
-                    error = target_qh - pred_qh
-                    loss_qh = torch.maximum(
-                        quantile * error,
-                        (quantile - 1) * error
-                    ).mean()
-                    
-                    total_loss += loss_qh
+        # Expand targets: (E, B, H) -> (E, B, Q, H)
 
-        return total_loss/ensemble_size 
+        # targets = targets.unsqueeze(2).expand(-1, -1, Q, -1)
+
+        # Quantiles shaped to (1,1,Q,1) for broadcasting
+        q = torch.as_tensor(self.quantiles, device=predictions.device, dtype=predictions.dtype).view(1, 1, Q, 1)
+
+        # Compute error and pinball loss
+        err = targets - predictions                      # (E, B, Q, H)
+        loss = torch.where(err >= 0, q * err, (q - 1.0) * err)
+
+        # Mean over all dimensions → scalar
+        return loss.mean()                           # scalar
 
 
 class EarlyStopping:
@@ -127,15 +110,16 @@ class EnsembleNNTrainer:
     def _get_optimizer(
         self,
         optimizer_type: OptimizerType,
-        learning_rate: float
+        learning_rate: float, 
+        penalty: float = 0.0
     ) -> optim.Optimizer:
         """Get optimizer."""
         if optimizer_type == "adam":
-            return optim.Adam(self.model.parameters(), lr=learning_rate)
+            return optim.Adam(self.model.parameters(), lr=learning_rate)#, weight_decay=penalty)
         elif optimizer_type == "adamw":
-            return optim.AdamW(self.model.parameters(), lr=learning_rate)
+            return optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=penalty)
         elif optimizer_type == "sgd":
-            return optim.SGD(self.model.parameters(), lr=learning_rate)
+            return optim.SGD(self.model.parameters(), lr=learning_rate, weight_decay=penalty)
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_type}")
     
@@ -168,9 +152,9 @@ class EnsembleNNTrainer:
 
             # CODE HERE - Use vmap with different batches for each model (Option 1 from tutorial)
             predictions = self.model(features, return_ensemble=True)
-            
+
             loss_ex_penalty = self.loss_fn(predictions, targets, ensemble=True)
-            
+
             # Add L2 regularization
             if l2 > 0.0:
                 l2_loss = sum(p.pow(2).sum() for p in self.model.parameters())
@@ -186,39 +170,63 @@ class EnsembleNNTrainer:
         
         return total_loss / n_batches if n_batches > 0 else 0.0
     
-    def validate(self, val_loaders: List[DataLoader]) -> List[float]:
-        """Validate model.
+    # def validate(self, val_loaders: List[DataLoader]) -> List[float]:
+    #     """Validate model.
         
-        Returns:
-            List of validation losses for each ensemble member
-        """
+    #     Returns:
+    #         List of validation losses for each ensemble member
+    #     """
+    #     self.model.eval()
+    #     total_losses = [0.0] * self.model.n_models
+    #     n_batches = 0
+
+    #     pbar = zip(*val_loaders)
+        
+    #     with torch.no_grad():
+    #         for batches in pbar:
+    #             features_list, targets_list = zip(*batches)
+                
+    #             # Stack features and targets - different batch for each model
+    #             features = torch.stack([f.to(self.device) for f in features_list])
+    #             targets = torch.stack([t.to(self.device) for t in targets_list])
+                
+    #             # CODE HERE - Use vmap with different batches for each model
+    #             predictions = self.model(features, return_ensemble=True)
+                
+              
+    #             # Calculate loss for each ensemble member
+    #             for e_idx in range(self.model.n_models):
+    #                 pred_e = predictions[e_idx:e_idx+1]  # Keep ensemble dimension
+    #                 target_e = targets[e_idx:e_idx+1]    # Use corresponding batch for each model
+    #                 loss_e = self.loss_fn(pred_e, target_e, ensemble=True)
+    #                 total_losses[e_idx] += loss_e.item()
+                
+    #             n_batches += 1
+        
+    #     return [total_loss / n_batches if n_batches > 0 else 0.0 for total_loss in total_losses]
+
+    def validate(self, val_loaders: List[DataLoader]) -> List[float]:
         self.model.eval()
-        total_losses = [0.0] * self.model.n_models
+        total_losses = torch.zeros(self.model.n_models, device=self.device)
         n_batches = 0
 
-        pbar = zip(*val_loaders)
-        
         with torch.no_grad():
-            for batches in pbar:
+            for batches in zip(*val_loaders):
                 features_list, targets_list = zip(*batches)
-                
-                # Stack features and targets - different batch for each model
                 features = torch.stack([f.to(self.device) for f in features_list])
-                targets = torch.stack([t.to(self.device) for t in targets_list])
-                
-                # CODE HERE - Use vmap with different batches for each model
-                predictions = self.model(features, return_ensemble=True)
-                
-                # Calculate loss for each ensemble member
-                for e_idx in range(self.model.n_models):
-                    pred_e = predictions[e_idx:e_idx+1]  # Keep ensemble dimension
-                    target_e = targets[e_idx:e_idx+1]    # Use corresponding batch for each model
-                    loss_e = self.loss_fn(pred_e, target_e, ensemble=True)
-                    total_losses[e_idx] += loss_e.item()
-                
+                targets  = torch.stack([t.to(self.device) for t in targets_list])
+
+                preds = self.model(features, return_ensemble=True)  # (E,B,Q,H)
+
+                # reuse PinballLoss math but keep per-E means
+                q = torch.as_tensor(self.quantiles, device=self.device, dtype=preds.dtype).view(1, 1, -1, 1)  # (1,1,Q,1)
+                err  = targets - preds
+                loss = torch.where(err >= 0, q * err, (q - 1.0) * err)  # (E,B,Q,H)
+                loss_per_e = loss.mean(dim=(1,2,3))                    # (E,)
+                total_losses += loss_per_e
                 n_batches += 1
-        
-        return [total_loss / n_batches if n_batches > 0 else 0.0 for total_loss in total_losses]
+
+        return (total_losses / max(n_batches, 1)).tolist()
     
     def fit(
         self,
@@ -262,21 +270,24 @@ class EnsembleNNTrainer:
         for epoch in pbar:
             # Training
             train_loss = self.train_epoch(train_loaders, optimizer, l2, verbose >= 2)
+            
             self.train_losses.append(train_loss)
             
             # Validation
             if val_loader is not None:
-                val_losses = self.validate(val_loader)
-                self.val_losses.append(val_losses)
-                avg_val_loss = np.mean(val_losses)
-                pbar.set_postfix({'train_loss': train_loss, 'val_loss': avg_val_loss})
-                
+                val_losses_epoch = self.validate(val_loader)
+                self.val_losses.append(val_losses_epoch)
+                avg_val_loss = np.mean(val_losses_epoch)
+                pbar.set_postfix({
+                    'train_loss': f"{train_loss:.4f}", 
+                    'val_loss': [f"{vl:.4f}" for vl in val_losses_epoch[:5]]
+                })
                 # Save best model states for each ensemble member
                 for e_idx in range(self.model.n_models):
-                    if val_losses[e_idx] < best_val_losses[e_idx]:
-                        best_val_losses[e_idx] = val_losses[e_idx]
+                    if val_losses_epoch[e_idx] < best_val_losses[e_idx]:
+                        best_val_losses[e_idx] = val_losses_epoch[e_idx]
                         if verbose >= 2:
-                            logger.info(f"New best model for ensemble {e_idx} at epoch {epoch}: val_loss={val_losses[e_idx]:.6f}")
+                            logger.info(f"New best model for ensemble {e_idx} at epoch {epoch}: val_loss={val_losses_epoch[e_idx]:.6f}")
                         # CODE HERE - Store individual model state
                         self.best_model_states[e_idx] = copy.deepcopy(self.model.models[e_idx].state_dict())
                 
@@ -316,7 +327,8 @@ class EnsembleNNTrainer:
         with torch.no_grad():
             for features, targets in data_loader:
                 features = features.to(self.device)
-                predictions = self.model(features, return_ensemble=False)
+            
+                predictions = self.model(features, return_ensemble=False, per_model_inputs=False)
                 
                 
                 all_predictions.append(predictions.cpu().numpy())

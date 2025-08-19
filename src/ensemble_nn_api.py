@@ -85,6 +85,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     def predict(self, data_list: List[pd.DataFrame]) -> Dict[str, np.ndarray]:
         predictions = []
         targets = []
+
         for i, df in enumerate(data_list):
             pred, target = self.predict_per_country(df, self.country_ids[i])  # Fixed method name
             predictions.append(pred)
@@ -137,8 +138,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         # Make predictions
         predictions, _ = self.trainer.predict(pred_loader)
         
+        
         # Add AR part back to predictions
-        predictions = self._add_AR_part(predictions, country_id, pred_target_data_raw)  # Fixed: use country_id
+        predictions = self._add_AR_part(predictions, country_id, pred_target_data_raw)  
 
         return predictions, targets
 
@@ -355,14 +357,15 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
     def _remove_AR_part(self, df, country):  # Fixed return type annotation
         horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons]
+
         for q in self.quantiles:
             for col in horizon_targets:
                 X = sm.add_constant(df[self.target])
                 df[f'{col}_q{q}'] = df[col] - self.ar_models[country][q][col].predict(X)
-
         # remove horizon targets from df
         for col in horizon_targets:
-            df.drop(columns=[col], inplace=True)  # Fixed: removed condition check
+            if f"{col}_q{q}" in df.columns:
+                df.drop(columns=[f"{col}"], inplace=True)
         return df
 
     def _add_AR_part(self, predictions, country, pred_target_data):  # Fixed return type annotation

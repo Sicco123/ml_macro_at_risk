@@ -2,7 +2,7 @@ seed: 123
 
 data:
   path: processed_per_country
-  target: prc_hicp_manr_CP00
+  target: INFL_OECD
   required_columns: []
   lags: []
   horizons: [1]
@@ -13,31 +13,31 @@ data:
   frequency: infer                  # assert equal spacing
   trimming: true
 
+
 splits:
-  validation_size: 0.15             # fraction of each country's data for validation
-  train_start: "1997-01-01"
+  validation_size: 0.3             # fraction of each country's data for validation
+  train_start: "2000-2-01"
   test_cutoff: "2017-12-01"         # last date in training; all later dates are test
   min_train_points: 12              # enforce minimum per country
 
 ensemble_nn:
-  units_per_layer: [8,8]
+  units_per_layer: [32,16, 8, 4, 2]
   activation: relu
   optimizer: adam
-  learning_rate: 1.0e-3
-  epochs: 1500
+  learning_rate: 1.0e-4
+  epochs: 750
   batch_size: 32
-  patience: 50
+  patience: 100
   parallel_models: 10
   per_country: false
   device: auto   
   country_dummies: false                   # cuda if available
-  l2_penalty: 0.05 
+  l2_penalty: 0.001 
 
 lqr:
-  alphas: [ 7.5, 10, 15, 20, 25, 30, 35]
+  alphas: [0.0, 0.001, 0.01,0.05, 0.1, 0.5, 1, 2.5, 5]
   solver: huberized
   rff_features: 1000
-  rolling: false
 
 output:
   save_predictions: true
