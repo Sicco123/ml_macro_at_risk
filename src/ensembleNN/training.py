@@ -55,26 +55,29 @@ class PinballLoss(nn.Module):
 
 class EarlyStopping:
     """Early stopping utility."""
-    
-    def __init__(self, patience: int = 10, min_delta: float = 1e-6):
+
+    def __init__(self, patience: int = 10, ensemble_size: int = 5, min_delta: float = 1e-6):
         self.patience = patience
         self.min_delta = min_delta
-        self.best_loss = float('inf')
-        self.counter = 0
-        
-    def __call__(self, val_loss: float) -> bool:
+        self.best_losses = [float('inf')] * ensemble_size
+        self.counters = [0] * ensemble_size
+
+    def __call__(self, val_losses: List[float]) -> bool:
         """Check if training should stop.
         
         Returns:
             True if training should stop
         """
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0
-            return False
-        else:
-            self.counter += 1
-            return self.counter >= self.patience
+        for i, val_loss in enumerate(val_losses):
+            if val_loss < self.best_losses[i] - self.min_delta:
+                self.best_losses[i] = val_loss
+                self.counters[i] = 0
+                return False
+            else:
+                self.counters[i] += 1
+
+        # all counters above patience
+        return all(c >= self.patience for c in self.counters)
 
 
 class EnsembleNNTrainer:
@@ -150,7 +153,7 @@ class EnsembleNNTrainer:
             
             optimizer.zero_grad()
 
-            # CODE HERE - Use vmap with different batches for each model (Option 1 from tutorial)
+        
             predictions = self.model(features, return_ensemble=True)
 
             loss_ex_penalty = self.loss_fn(predictions, targets, ensemble=True)
@@ -170,40 +173,6 @@ class EnsembleNNTrainer:
         
         return total_loss / n_batches if n_batches > 0 else 0.0
     
-    # def validate(self, val_loaders: List[DataLoader]) -> List[float]:
-    #     """Validate model.
-        
-    #     Returns:
-    #         List of validation losses for each ensemble member
-    #     """
-    #     self.model.eval()
-    #     total_losses = [0.0] * self.model.n_models
-    #     n_batches = 0
-
-    #     pbar = zip(*val_loaders)
-        
-    #     with torch.no_grad():
-    #         for batches in pbar:
-    #             features_list, targets_list = zip(*batches)
-                
-    #             # Stack features and targets - different batch for each model
-    #             features = torch.stack([f.to(self.device) for f in features_list])
-    #             targets = torch.stack([t.to(self.device) for t in targets_list])
-                
-    #             # CODE HERE - Use vmap with different batches for each model
-    #             predictions = self.model(features, return_ensemble=True)
-                
-              
-    #             # Calculate loss for each ensemble member
-    #             for e_idx in range(self.model.n_models):
-    #                 pred_e = predictions[e_idx:e_idx+1]  # Keep ensemble dimension
-    #                 target_e = targets[e_idx:e_idx+1]    # Use corresponding batch for each model
-    #                 loss_e = self.loss_fn(pred_e, target_e, ensemble=True)
-    #                 total_losses[e_idx] += loss_e.item()
-                
-    #             n_batches += 1
-        
-    #     return [total_loss / n_batches if n_batches > 0 else 0.0 for total_loss in total_losses]
 
     def validate(self, val_loaders: List[DataLoader]) -> List[float]:
         self.model.eval()
@@ -227,7 +196,44 @@ class EnsembleNNTrainer:
                 n_batches += 1
 
         return (total_losses / max(n_batches, 1)).tolist()
-    
+
+    def initialize_validation(self, val_loaders: List[DataLoader]) -> None:
+        """Initialize validation state."""
+        # check a model where all paramters are set to zero and use it as the baseline
+        self.model.eval()
+        # baseline model 
+        baseline_model = copy.deepcopy(self.model)
+        # for parameter and bias in baseline model set everything to zero
+        for param in baseline_model.parameters():
+            param.data.zero_()
+
+        
+        total_losses = torch.zeros(self.model.n_models, device=self.device)
+        n_batches = 0
+
+        with torch.no_grad():
+            for batches in zip(*val_loaders):
+                features_list, targets_list = zip(*batches)
+                features = torch.stack([f.to(self.device) for f in features_list])
+                targets  = torch.stack([t.to(self.device) for t in targets_list])
+                
+                
+                preds = baseline_model(features, return_ensemble=True)
+                  # reuse PinballLoss math but keep per-E means
+                q = torch.as_tensor(self.quantiles, device=self.device, dtype=preds.dtype).view(1, 1, -1, 1)  # (1,1,Q,1)
+                err  = targets - preds
+                loss = torch.where(err >= 0, q * err, (q - 1.0) * err)  # (E,B,Q,H)
+                loss_per_e = loss.mean(dim=(1,2,3))                    # (E,)
+                total_losses += loss_per_e
+                n_batches += 1
+
+            for e_idx in range(self.model.n_models):
+                self.best_model_states[e_idx] = copy.deepcopy(self.model.models[e_idx].state_dict())
+
+
+        return (total_losses / max(n_batches, 1)).tolist()
+
+
     def fit(
         self,
         train_loaders: List[DataLoader],
@@ -257,13 +263,15 @@ class EnsembleNNTrainer:
      
 
         optimizer = self._get_optimizer(optimizer_type, learning_rate)
-        early_stopping = EarlyStopping(patience) if val_loader is not None else None
-        
+        early_stopping = EarlyStopping(patience, ensemble_size=self.model.n_models) if val_loader is not None else None
+
         best_val_losses = np.array([np.inf] * self.model.n_models)
+
+        # initialize validation
         
         # Initialize train losses with empty lists
         self.train_losses = []
-        self.val_losses = []
+        self.val_losses = [self.initialize_validation(val_loader)]
 
         # Add tqdm 
         pbar = tqdm(range(epochs), desc="Training", disable=verbose < 1)
@@ -277,7 +285,7 @@ class EnsembleNNTrainer:
             if val_loader is not None:
                 val_losses_epoch = self.validate(val_loader)
                 self.val_losses.append(val_losses_epoch)
-                avg_val_loss = np.mean(val_losses_epoch)
+                
                 pbar.set_postfix({
                     'train_loss': f"{train_loss:.4f}", 
                     'val_loss': [f"{vl:.4f}" for vl in val_losses_epoch[:5]]
@@ -292,7 +300,7 @@ class EnsembleNNTrainer:
                         self.best_model_states[e_idx] = copy.deepcopy(self.model.models[e_idx].state_dict())
                 
                 # Early stopping based on average validation loss
-                if early_stopping and early_stopping(avg_val_loss):
+                if early_stopping and early_stopping(val_losses_epoch):
                     if verbose >= 1:
                         logger.info(f"Early stopping at epoch {epoch}")
                     break
