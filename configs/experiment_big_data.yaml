@@ -14,21 +14,21 @@ data:
   trimming: true
 
 splits:
-  validation_size: 0.4             # fraction of each country's data for validation
+  validation_size: 0.3             # fraction of each country's data for validation
   train_start: "1997-01-01"
   test_cutoff: "2017-12-01"         # last date in training; all later dates are test
   min_train_points: 12              # enforce minimum per country
 
 ensemble_nn:
-  units_per_layer: [32,32]
+  units_per_layer: [32,32,32,32,32]
   activation: relu
   optimizer: adam
-  learning_rate: 1.0e-4
+  learning_rate: 5.0e-5
   epochs: 1500
   batch_size: 32
-  patience: 10
+  patience: 50
   parallel_models: 10
-  per_country: false
+  per_country: true
   device: auto   
   country_dummies: false                   # cuda if available
   l2_penalty: 0.0001 

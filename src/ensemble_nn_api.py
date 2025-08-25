@@ -98,7 +98,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     def predict_per_country(self, df, country_id):
         # Convert to country dictionary
         pred_country_data = {}
-        
+  
         pred_country_data[country_id] = df.copy()
     
         # Prepare data
