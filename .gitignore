@@ -210,3 +210,7 @@ __marimo__/
 *.csv
 *.ipynb
 *.parquet
+
+analysis_output/
+
+.vscode/

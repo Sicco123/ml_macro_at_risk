@@ -77,6 +77,11 @@ def save_dataframe(df, filename, subdir="data"):
 def main():
     """Main analysis function"""
     
+
+    # chekc avialability of GPU 
+
+
+
     logging.info("Starting Cross-Country Quantile Forecasting Analysis")
     logging.info("="*70)
     
@@ -265,7 +270,7 @@ Validation size: {config['splits']['validation_size']}
     
     # Update config with actual columns
     config['data']['required_columns'] = list(country_data[list(country_data.keys())[0]].columns)
-    logging.info(f"Updated required columns in config: {config['data']['required_columns']}")
+    #logging.info(f"Updated required columns in config: {config['data']['required_columns']}")
     
     # Visualize the data
     variables = config['data']['required_columns'][1:]  # Exclude 'TIME'
@@ -412,7 +417,7 @@ Data shape: {lagged_train[sample_country].shape}"""
     
     # Save sample of processed data
     sample_processed = target_train[sample_country][['TIME'] + target_cols].head()
-    save_dataframe(sample_processed, f"processed_data_sample_{sample_country}.csv")
+    save_dataframe(sample_processed, f"processed_data_sample_{sample_country}.excsv")
     
     # ===== MODEL TRAINING =====
     logging.info("\n" + "="*50)
