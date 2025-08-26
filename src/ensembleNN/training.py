@@ -145,16 +145,16 @@ class EnsembleNNTrainer:
         pbar = zip(*train_loaders)
 
         for batches in pbar:
-            features_list, targets_list = zip(*batches)
+            features_list, targets_list, country_codes_list = zip(*batches)
             
             # Stack features and targets from different data loaders - different batch for each model
             features = torch.stack([f.to(self.device) for f in features_list])  # (n_models, batch_size, input_dim)
             targets = torch.stack([t.to(self.device) for t in targets_list])    # (n_models, batch_size, n_quantiles, n_horizons)
-            
+            country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])  # (n_models, batch_size)
+
             optimizer.zero_grad()
 
-        
-            predictions = self.model(features, return_ensemble=True)
+            predictions = self.model(features, country_codes, return_ensemble=True)
 
             loss_ex_penalty = self.loss_fn(predictions, targets, ensemble=True)
 
@@ -181,11 +181,12 @@ class EnsembleNNTrainer:
 
         with torch.no_grad():
             for batches in zip(*val_loaders):
-                features_list, targets_list = zip(*batches)
+                features_list, targets_list, country_codes_list = zip(*batches)
                 features = torch.stack([f.to(self.device) for f in features_list])
                 targets  = torch.stack([t.to(self.device) for t in targets_list])
+                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
 
-                preds = self.model(features, return_ensemble=True)  # (E,B,Q,H)
+                preds = self.model(features, country_codes, return_ensemble=True)  # (E,B,Q,H)
 
                 # reuse PinballLoss math but keep per-E means
                 q = torch.as_tensor(self.quantiles, device=self.device, dtype=preds.dtype).view(1, 1, -1, 1)  # (1,1,Q,1)
@@ -213,12 +214,12 @@ class EnsembleNNTrainer:
 
         with torch.no_grad():
             for batches in zip(*val_loaders):
-                features_list, targets_list = zip(*batches)
+                features_list, targets_list, country_codes_list = zip(*batches)
                 features = torch.stack([f.to(self.device) for f in features_list])
                 targets  = torch.stack([t.to(self.device) for t in targets_list])
-                
-                
-                preds = baseline_model(features, return_ensemble=True)
+                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
+
+                preds = baseline_model(features, country_codes, return_ensemble=True)
                   # reuse PinballLoss math but keep per-E means
                 q = torch.as_tensor(self.quantiles, device=self.device, dtype=preds.dtype).view(1, 1, -1, 1)  # (1,1,Q,1)
                 err  = targets - preds
@@ -333,12 +334,12 @@ class EnsembleNNTrainer:
         all_targets = []
         
         with torch.no_grad():
-            for features, targets in data_loader:
+            for features, targets, country_codes in data_loader:
                 features = features.to(self.device)
-            
-                predictions = self.model(features, return_ensemble=False, per_model_inputs=False)
-                
-                
+                country_codes = country_codes.to(self.device)
+
+                predictions = self.model(features, country_codes, return_ensemble=False, per_model_inputs=False)
+
                 all_predictions.append(predictions.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
         

@@ -51,16 +51,16 @@ class CountryTimeSeriesDataset(Dataset):
         all_countries = []
         all_times = []
 
-
+        idx = 0
         for country_code, df in self.data.items():
             features, targets, times = self._process_country_data(df, country_code)
-            
+            country_code_int = idx
             if len(features) > 0:
                 all_features.append(features)
                 all_targets.append(targets)
-                all_countries.extend([country_code] * len(features))
+                all_countries.extend([country_code_int] * len(features))
                 all_times.extend(times)
-        
+            idx += 1
 
         if not all_features:
             raise ValueError("No valid samples found in dataset")
@@ -77,11 +77,16 @@ class CountryTimeSeriesDataset(Dataset):
         # Concatenate all countries
         self.features = np.vstack(all_features)
         self.targets = np.vstack(all_targets)
+
         
         # Debug: Check dtype right after stacking
         logger.debug(f"After vstack - features dtype: {self.features.dtype}, targets dtype: {self.targets.dtype}")
-        
-        self.countries = all_countries
+
+        self.countries = np.array(all_countries)
+        # expand dims witht two dims
+        self.countries = np.expand_dims(self.countries, axis=1)
+        self.countries = np.expand_dims(self.countries, axis=2)
+
         self.times = all_times
 
 
@@ -127,12 +132,12 @@ class CountryTimeSeriesDataset(Dataset):
     def _process_country_data(self, df: pd.DataFrame, country_code: str) -> Tuple[np.ndarray, np.ndarray, List]:
         """Process data for a single country."""
         # Determine feature columns
-        feature_cols = []
+        feature_cols = [f"{self.target_col}_untransformed"]
         target_cols = []
         horizon_target_cols = [f"{self.target_col}_h{h}_q{q}" for h in self.horizons for q in self.quantiles]
 
         for col in df.columns:
-            if col == self.time_col or col == f"{self.target_col}_untransformed":
+            if col == self.time_col or col == f"{self.target_col}_untransformed" :
                
                 continue
             # if {target_col}_h{horizon} = col continue 
@@ -178,6 +183,7 @@ class CountryTimeSeriesDataset(Dataset):
             # Get data
             features_data = self.features[idx]
             targets_data = self.targets[idx]
+            country_codes = self.countries[idx]
             
             # Robust conversion to float64 - multiple fallback strategies
             def safe_convert_to_float64(data, name, idx):
@@ -213,8 +219,9 @@ class CountryTimeSeriesDataset(Dataset):
             # Convert to tensors
             features = torch.FloatTensor(features_data)
             targets = torch.FloatTensor(targets_data)
-            return features, targets
-            
+            country_codes = torch.IntTensor(country_codes)
+            return features, targets, country_codes
+
         except Exception as e:
             logger.error(f"Complete failure converting sample {idx} to tensor: {e}")
             logger.error(f"Sample country: {self.countries[idx] if idx < len(self.countries) else 'Unknown'}")

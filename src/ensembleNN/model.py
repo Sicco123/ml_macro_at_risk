@@ -60,6 +60,36 @@ class FastNN(nn.Module):
 
     def get_model_size(self) -> int:
         return sum(p.numel() for p in self.parameters())
+    
+class AR_per_country(nn.Module):
+    def __init__(self,
+                 intercepts, 
+                 phis,
+                 quantiles, 
+                 horizons
+                 ):
+        super().__init__()
+        self.intercepts = intercepts
+        self.phis = phis
+        self.quantiles = quantiles
+        self.horizons = horizons
+
+        self.phi_tensors = nn.Parameter(torch.tensor(phis, dtype=torch.float32), requires_grad=True)
+        self.intercept_tensors = nn.Parameter(torch.tensor(intercepts, dtype=torch.float32), requires_grad=True)
+        
+        
+   
+    def forward(self, x: torch.Tensor, country_codes: torch.Tensor) -> torch.Tensor:
+        
+        # Extract country indices once
+        country_idx = country_codes[:, 0, 0]  # Shape: (batch_size,)
+        
+        x_expanded = x.squeeze(-1).unsqueeze(1).unsqueeze(2)  # Shape: (batch_size, 1, 1)
+        
+        output = (self.intercept_tensors[country_idx] + 
+                self.phi_tensors[country_idx] * x_expanded)
+        
+        return output
 
 class EnsembleNN(nn.Module):
     """Ensemble of Neural Networks using vmap for efficient computation."""
@@ -71,7 +101,9 @@ class EnsembleNN(nn.Module):
         forecast_horizons: List[int],
         units_per_layer: List[int],
         n_models: int = 5,
-        activation: ActivationType = "relu"
+        activation: ActivationType = "relu",
+        intercepts_init = None,
+        phis_init =  None,
     ):
         """Initialize Ensemble Factor Neural Network.
         
@@ -82,6 +114,8 @@ class EnsembleNN(nn.Module):
             units_per_layer: Number of units in each hidden layer
             n_models: Number of models in ensemble
             activation: Activation function type
+            intercepts_init: Initial intercepts for each model
+            phis_init: Initial AR coefficients for each model
         """
         super().__init__()
         
@@ -91,26 +125,38 @@ class EnsembleNN(nn.Module):
         self.units_per_layer = units_per_layer
         self.n_models = n_models
         self.activation = activation
-        
+        self.intercepts_init = intercepts_init
+        self.phis_init = phis_init
+
         # Create ensemble of models
         self.models = nn.ModuleList([
             FastNN(input_dim, quantiles, forecast_horizons, units_per_layer, activation)
             for _ in range(n_models)
         ])
-        
+
+        self.ar_models = nn.ModuleList([
+            AR_per_country(intercepts_init, phis_init, quantiles, forecast_horizons)
+            for _ in range(n_models)
+        ])
 
         logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
 
-    def forward(self, x: torch.Tensor, return_ensemble: bool = True, per_model_inputs: bool = True) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, country_codes: torch.Tensor, return_ensemble: bool = True, per_model_inputs: bool = True) -> torch.Tensor:
 
-
-        # run each model and collect outputs (Python loop is fine; avoid cat!)
         if per_model_inputs:
-            ensemble = torch.stack([m(x[i]) for i, m in enumerate(self.models)], dim=0)  # (n_models, batch, n_q, n_h)
+            # x[i] is (batch, features), need to extract first feature for AR
+            ensemble = torch.stack([
+                m(x[i,:,1:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
+                for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
+            ], dim=0)
         else:
-            ensemble = torch.stack([m(x) for m in self.models], dim=0)  # (n_models, batch, n_q, n_h)
+            # x is (batch, features), extract first feature for AR  
+            ensemble = torch.stack([
+                m(x[:, 1:]) + ar_m(x[:, 0:1], country_codes)
+                for m, ar_m in zip(self.models, self.ar_models)
+            ], dim=0)
+        
         return ensemble if return_ensemble else ensemble.mean(dim=0)
-
 
 

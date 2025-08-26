@@ -109,6 +109,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             pred_lagged_data, self.target, self.forecast_horizons, time_col="TIME"
         )
 
+      
+
         target_cols = [f"{self.target}_h{h}" for h in self.forecast_horizons]
 
         targets = pred_target_data[country_id][target_cols].values
@@ -116,15 +118,23 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         # Apply stored transformations to prediction data
         if hasattr(self, 'transformations'):
             for country, df in pred_target_data.items():
-                df = self._remove_AR_part(df, country)
+                #df = self._remove_AR_part(df, country)
 
                 if country in self.transformations:
                     # Apply normalization using stored lambda functions
-                    for col, transform_dict in self.transformations[country].items():
+                    for col, transform_dict in self.transformations[country].items():   
                         if col in df.columns:
+                            if col == self.target:
+                                df[col+"_untransformed"] = df[col] 
+                                df[col] = transform_dict['normalize'](df[col])
+
                             pred_target_data[country][col] = transform_dict['normalize'](df[col])
                 else:
                     logger.warning(f"No transformations found for country {country}. Using raw data.")
+
+     
+        pred_target_data = self._per_quantile_per_horizon_targets(pred_target_data)
+        
         
         # Create dataset and data loader
         pred_dataset = CountryTimeSeriesDataset(
@@ -140,7 +150,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         
         
         # Add AR part back to predictions
-        predictions = self._add_AR_part(predictions, country_id, pred_target_data_raw)  
+        #predictions = self._add_AR_part(predictions, country_id, pred_target_data_raw)  
 
         return predictions, targets
 
@@ -162,7 +172,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         if self.seed is not None:
             set_seeds(self.seed)
 
-        self._prefit()
+        #self._prefit()
+        intercepts, phis = self._get_AR_terms()
         self._pretransform()
         
         
@@ -186,7 +197,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             forecast_horizons=self.forecast_horizons,
             units_per_layer=self.units_per_layer,
             n_models=parallel_models,
-            activation=self.activation
+            activation=self.activation, 
+            intercepts_init=intercepts,
+            phis_init=phis
         )
         
         self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
@@ -321,6 +334,11 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     
                 for col in cols_to_normalize:
                     if col in df.columns and col in global_transformations:
+                        if col == self.target:
+                             self.features_and_targets[country][col+"_untransformed"] = df[col]
+                             self.features_and_targets[country][col] = global_transformations[col]['normalize'](df[col])
+                             continue
+
                         self.features_and_targets[country][col] = global_transformations[col]['normalize'](df[col])
                 
                 if self.verbose >= 2:
@@ -334,6 +352,41 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         for country, df in self.features_and_targets.items():
             self._fit_AR_models(df, country)  # Fixed method name
             df = self._remove_AR_part(df, country)  # Fixed method name
+
+    def _get_AR_terms(self):
+        intercepts = np.zeros((len(self.country_ids), len(self.quantiles), len(self.forecast_horizons)))
+        phis = np.zeros((len(self.country_ids), len(self.quantiles), len(self.forecast_horizons)))
+        idx = 0
+    
+        for country, df in self.features_and_targets.items():
+            self._fit_AR_models(df, country)
+            for q_idx, q in enumerate(self.quantiles):  # Use enumerate to get proper index
+                for h_idx, h in enumerate(self.forecast_horizons):  # Use enumerate for horizons too
+                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params[0]
+                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params[1]
+                    
+
+            idx += 1
+
+        self.features_and_targets = self._per_quantile_per_horizon_targets(self.features_and_targets)
+        
+        return intercepts, phis
+
+    def _per_quantile_per_horizon_targets(self, features_and_targets):
+        horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons]
+
+        for country, df in features_and_targets.items():
+
+            for q in self.quantiles:
+                for col in horizon_targets:
+                    df[f'{col}_q{q}'] = df[col] 
+            # remove horizon targets from df
+      
+            for col in horizon_targets:
+                if f"{col}_q{q}" in df.columns:
+                    df.drop(columns=[f"{col}"], inplace=True)
+        return features_and_targets
+        
 
     def _fit_AR_models(self, df: pd.DataFrame, country) -> Dict[str, Dict[float, Dict[str, sm.regression.quantile_regression.QuantRegResults]]]:
         
@@ -351,6 +404,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 model = sm.QuantReg(y, X)
                 fitted_model = model.fit(q=q)
                 hor_models[col] = fitted_model
+
 
             q_models[q] = hor_models
         self.ar_models[country] = q_models
