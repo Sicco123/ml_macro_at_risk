@@ -229,8 +229,10 @@ class EnsembleNNTrainer:
                 n_batches += 1
 
             for e_idx in range(self.model.n_models):
-                self.best_model_states[e_idx] = copy.deepcopy(self.model.models[e_idx].state_dict())
-
+                self.best_model_states[e_idx] = {
+                    k: v.clone().detach() 
+                    for k, v in self.model.models[e_idx].state_dict().items()
+                }
 
         return (total_losses / max(n_batches, 1)).tolist()
 
@@ -261,6 +263,23 @@ class EnsembleNNTrainer:
         Returns:
             Training history
         """
+
+         # Compile the model for faster execution (PyTorch 2.0+)
+        if hasattr(torch, 'compile'):
+            try:
+                print("compiling")
+                # Compile with different modes based on your needs
+                self.model = torch.compile(
+                    self.model, 
+                    mode='reduce-overhead',  # Options: 'default', 'reduce-overhead', 'max-autotune'
+                    fullgraph=True,  # Try to compile the entire graph
+                    dynamic=False    # Assume fixed input shapes for better optimization
+                )
+                if verbose >= 1:
+                    logger.info("Model compiled with torch.compile")
+            except Exception as e:
+                if verbose >= 1:
+                    logger.warning(f"Failed to compile model: {e}")
      
 
         optimizer = self._get_optimizer(optimizer_type, learning_rate)
@@ -274,7 +293,7 @@ class EnsembleNNTrainer:
         self.train_losses = []
         self.val_losses = [self.initialize_validation(val_loader)]
 
-        # Add tqdm 
+        # Add tqdm  
         pbar = tqdm(range(epochs), desc="Training", disable=verbose < 1)
         for epoch in pbar:
             # Training
@@ -298,7 +317,10 @@ class EnsembleNNTrainer:
                         if verbose >= 2:
                             logger.info(f"New best model for ensemble {e_idx} at epoch {epoch}: val_loss={val_losses_epoch[e_idx]:.6f}")
                         # CODE HERE - Store individual model state
-                        self.best_model_states[e_idx] = copy.deepcopy(self.model.models[e_idx].state_dict())
+                        self.best_model_states[e_idx] = {
+                            k: v.clone().detach() 
+                            for k, v in self.model.models[e_idx].state_dict().items()
+                        }
                 
                 # Early stopping based on average validation loss
                 if early_stopping and early_stopping(val_losses_epoch):

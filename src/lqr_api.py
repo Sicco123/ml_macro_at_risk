@@ -223,14 +223,14 @@ class LQR:
             solver=self.solver
         )
         
-        print("hi2.1")
+      
         # Fit model
         #logger.info(f"Fitting LQR with alpha={self.best_alpha}")
         self.model.fit(self.X, self.y)
-        print("hi2.2")
+     
         # Get coefficients
         coef_df = self.model.get_coefficients()
-        print("hi2.3")
+        
         self.is_fitted = True
         
         #logger.info("LQR model fitted successfully")

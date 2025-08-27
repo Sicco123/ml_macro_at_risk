@@ -429,7 +429,7 @@ def _build_lqr_per_country(
         solver=params.get("solver", "huberized"),
         seed=seed
     )
-    print("hi")
+
     # Optional CV for alpha - optimized for single country
     if  params.get("use_cv", False):
         alphas = params.get("alphas", [])
@@ -440,10 +440,10 @@ def _build_lqr_per_country(
                 mdl.k_fold_validation(alphas=alphas, n_splits=splits)
             except Exception as e:
                 logging.warning(f"[{('AR-QR-PC' if ar_only else 'LQR-PC')}] CV failed, falling back to default alpha. Reason: {e}")
-    print("hi2")
+
     # Fit
     mdl.fit()
-    print("hi3")
+
     return mdl
 
 def _build_lqr(

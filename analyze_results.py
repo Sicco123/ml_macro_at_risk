@@ -24,9 +24,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from scipy.stats import rankdata
-import statsmodels.api as sm
-from statsmodels.tsa.stattools import acf
+# from scipy.stats import rankdata
+# import statsmodels.api as sm
+# from statsmodels.tsa.stattools import acf
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')

@@ -201,7 +201,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             intercepts_init=intercepts,
             phis_init=phis
         )
-        
+
         self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
 
         # if verbose >= 1:

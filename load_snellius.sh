@@ -1,0 +1,2 @@
+
+module load 2023 PyTorch/2.1.2-foss-2023a SciPy-bundle/2023.07-gfbf-2023a matplotlib/3.7.2-gfbf-2023a scikit-learn/1.3.1-gfbf-2023a PyYAML/6.0-GCCcore-12.3.0 statsmodels/0.14.1-gfbf-2023a tqdm/4.66.1-GCCcore-12.3.0 typing-extensions/4.9.0-GCCcore-12.3.0

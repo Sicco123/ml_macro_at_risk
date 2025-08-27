@@ -27,8 +27,8 @@ splits:
 runtime:
   allow_reload: true                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  max_cores: 1                         # or specify int
-  max_ram_gb: 10.0                      # or specify float
+  max_cores: 15                         # or specify int
+  max_ram_gb: 30.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
   mem_probe_fudge_mb: 200              # extra margin on top of probe
   retries: 1                           # automatic retries on failure
@@ -61,7 +61,7 @@ models:
       cv_splits: 5
 
   - type: lqr-per-country
-    enabled: true
+    enabled: false
     params:
       # LQR estimated separately for each country
       solver: huberized
@@ -78,7 +78,7 @@ models:
       cv_splits: 5
 
   - type: nn
-    enabled: false
+    enabled: true
     per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
       - name: v1
