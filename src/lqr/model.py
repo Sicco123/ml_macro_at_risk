@@ -149,21 +149,23 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
     
     def _fit_huberized(self, X: np.ndarray, y: np.ndarray) -> None:
         """Fit using huberized pinball loss."""
-        # Initialize parameters
+        X = np.ascontiguousarray(X, dtype=np.float64)
+        y = np.ascontiguousarray(y, dtype=np.float64)
+
+        p = X.shape[1]
         if self.fit_intercept:
-            init_params = np.zeros(X.shape[1] + 1)
-            init_params[0] = np.median(y)  # Initialize intercept with median
+            init = np.zeros(p + 1, dtype=np.float64)
+            init[0] = np.median(y)
         else:
-            init_params = np.zeros(X.shape[1])
-        
-        # Optimize
+            init = np.zeros(p, dtype=np.float64)
+
         result = minimize(
-            fun=huberized_pinball_loss,
-            x0=init_params,
+            fun=huberized_pinball_loss,      # keep your existing function
+            x0=init,
             args=(X, y, self.quantile, self.alpha),
-            jac=huberized_pinball_gradient,
-            method='L-BFGS-B',
-            options={'maxiter': self.max_iter, 'ftol': self.tol}
+            jac=huberized_pinball_gradient,  # keep your existing gradient
+            method="L-BFGS-B",
+            options={"maxiter": self.max_iter, "ftol": self.tol}
         )
         
         if not result.success:
