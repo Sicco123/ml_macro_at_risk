@@ -1,0 +1,80 @@
+seed: 123
+
+runtime:
+  allow_reload: true               # if true, load existing models/forecasts instead of retraining
+  retrain_if_exists: false         # if true, force retrain even if model artifact exists
+  max_cores: auto                  # integer or 'auto'
+  safety_ram_fraction: 0.8         # use at most this fraction of detected available RAM
+  max_ram_gb: auto                 # hard cap; number or 'auto'
+  mem_probe_fudge_mb: 200          # add this to each task's measured memory (to be conservative)
+  retries: 1                       # automatic retries per failed task
+  progress_refresh_sec: 5          # how often to rewrite dashboard (seconds)
+
+io:
+  data_path: processed_per_country # directory with per-country parquet/csv
+  output_root: parallel_outputs    # root folder
+  models_dir: models
+  forecasts_dir: forecasts
+  progress_dir: progress
+  logs_dir: logs
+  progress_file: progress/progress.parquet
+  errors_file: progress/errors.parquet
+
+data:
+  target: prc_hicp_manr_CP00
+  required_columns: []             # extra columns required; if missing, raise
+  lags: [1, 2, 3, 6, 12]          # lag features to create
+  horizons: [1, 3, 6, 12]         # forecast horizons
+  quantiles: [0.1, 0.5, 0.9]      # quantiles to forecast
+  missing: forward_fill_then_mean  # or interpolate_linear | drop
+  scale: per_country               # or global | none
+  scale_target: false
+  trimming: true                   # drop leading/trailing NaNs created by lags
+
+splits:
+  validation_size: 0.3
+  train_start: "1997-01-01"
+  test_cutoff: "2017-12-01"        # last date in training; windows roll from here forward
+  min_train_points: 24
+
+# Rolling window settings
+rolling_window:
+  size: 60                         # number of periods in each window (e.g., months)
+  step: 1                          # advance per window
+  start_date: "2018-01-01"         # first forecast date
+  end_date: "2023-12-01"           # last forecast date
+
+# Model configurations
+models:
+  ar_qr:
+    enabled: true
+    p: 12                          # number of AR lags
+    add_drift: true
+    solver: huberized
+    
+  lqr:
+    enabled: true
+    alphas: [7.5, 10, 15, 20, 25, 30, 35]  # regularization strengths to try
+    solver: huberized
+    rff_features: 1000             # Random Fourier Features (0 to disable)
+    rolling: false
+    
+  ensemble_nn:
+    enabled: true
+    units_per_layer: [32, 32, 32, 32, 32]
+    activation: relu
+    optimizer: adam
+    learning_rate: 5.0e-5
+    epochs: 1500
+    batch_size: 32
+    patience: 50
+    parallel_models: 10
+    device: cpu                    # forced to cpu in this runner
+    per_country: false
+    country_dummies: false
+    l2_penalty: 0.0001
+
+output:
+  save_predictions: true
+  save_factors: true
+  save_models: true

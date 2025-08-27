@@ -1,0 +1,17 @@
+input:
+  forecasts_dir: "outputs/forecasts"
+
+output:
+  base_dir: "analysis_output_hq"
+
+analysis:
+  benchmark_model: "ar-qr-per-country"  # Model to use as benchmark for DM tests
+  mcs_alpha: 0.1  # Significance level for Model Confidence Set
+
+plots:
+  separate_quantiles: false  # All quantiles in one plot for comparison
+  high_quality: true         # High DPI and PDF format
+
+covid:
+  start_date: "2020-03-01"
+  end_date: "2021-12-31"

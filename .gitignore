@@ -214,3 +214,7 @@ __marimo__/
 analysis_output/
 
 .vscode/
+
+*.pkl 
+*.lock
+.DS_Store
