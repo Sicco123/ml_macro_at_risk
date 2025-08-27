@@ -126,8 +126,8 @@ class CountryTimeSeriesDataset(Dataset):
                     logger.error("Creating zeros array as last resort")
                     self.targets = np.zeros(self.targets.shape, dtype=np.float64)
 
-        logger.info(f"Dataset built: {len(self.features)} samples, {self.features.shape[1]} features")
-        logger.info(f"Features dtype: {self.features.dtype}, Targets dtype: {self.targets.dtype}")
+        #logger.info(f"Dataset built: {len(self.features)} samples, {self.features.shape[1]} features")
+        #logger.info(f"Features dtype: {self.features.dtype}, Targets dtype: {self.targets.dtype}")
     
     def _process_country_data(self, df: pd.DataFrame, country_code: str) -> Tuple[np.ndarray, np.ndarray, List]:
         """Process data for a single country."""

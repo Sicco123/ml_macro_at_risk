@@ -23,13 +23,13 @@ def get_device(device_spec: str = "auto") -> torch.device:
     if device_spec == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
-            logger.info(f"Using CUDA device: {torch.cuda.get_device_name()}")
+            ##logger.info(f"Using CUDA device: {torch.cuda.get_device_name()}")
         else:
             device = torch.device("cpu")
-            logger.info("Using CPU device")
+            ##logger.info("Using CPU device")
     else:
         device = torch.device(device_spec)
-        logger.info(f"Using specified device: {device}")
+        ##logger.info(f"Using specified device: {device}")
     
     return device
 
@@ -76,7 +76,7 @@ def save_model(
     
     filepath.parent.mkdir(parents=True, exist_ok=True)
     torch.save(checkpoint, filepath)
-    logger.info(f"Model saved to {filepath}")
+    #logger.info(f"Model saved to {filepath}")
 
 
 def load_model(
@@ -103,7 +103,7 @@ def load_model(
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     
-    logger.info(f"Model loaded from {filepath}")
+    #logger.info(f"Model loaded from {filepath}")
     
     return {
         'epoch': checkpoint.get('epoch', 0),

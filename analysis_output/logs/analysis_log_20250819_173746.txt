@@ -1,3 +1,0 @@
-2025-08-19 17:37:46,129 - INFO - Starting Cross-Country Quantile Forecasting Analysis
-2025-08-19 17:37:46,129 - INFO - ======================================================================
-2025-08-19 17:38:19,891 - ERROR - Import error: No module named 'tqdm'

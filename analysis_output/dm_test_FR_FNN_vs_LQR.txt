@@ -1,3 +1,0 @@
-
-FR - Diebold-Mariano Tests (FNN vs LQR):
-  H1 Q0.10: DM=3.766, p=0.000*** -> LQR

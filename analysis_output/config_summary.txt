@@ -1,7 +1,0 @@
-
-Key parameters:
-Target variable: prc_hicp_manr_CP00
-Quantiles: [0.1]
-Horizons: [1]
-Lags: []
-Validation size: 0.15

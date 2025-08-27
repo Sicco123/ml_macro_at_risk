@@ -1,8 +1,0 @@
-TRAINING STATUS SUMMARY:
-✓ Data preprocessing: SUCCESSFUL
-✓ Feature engineering: SUCCESSFUL 
-✓ Dataset creation: SUCCESSFUL
-✓ Data type handling: SUCCESSFUL
-✓ Factor NN training: SUCCESSFUL
-✓ LQR training: SUCCESSFUL (25 models)
-✓ LQR AR training: SUCCESSFUL (25 models)

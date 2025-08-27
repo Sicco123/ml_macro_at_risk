@@ -154,7 +154,7 @@ def select_best_alpha(
     else:
         raise ValueError(f"Unknown selection method: {method}")
     
-    logger.info(f"Selected alpha = {best_alpha} with score = {alpha_scores[best_alpha]:.6f}")
+    #logger.info(f"Selected alpha = {best_alpha} with score = {alpha_scores[best_alpha]:.6f}")
     
     return best_alpha
 

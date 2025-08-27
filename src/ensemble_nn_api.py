@@ -80,7 +80,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         self.trainer = None
         self.is_fitted = False
         
-        logger.info(f"EnsembleNNAPI initialized with {len(self.country_data)} countries")
+        #logger.info(f"EnsembleNNAPI initialized with {len(self.country_data)} countries")
         
     def predict(self, data_list: List[pd.DataFrame]) -> Dict[str, np.ndarray]:
         predictions = []
@@ -204,11 +204,11 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         
         self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
 
-        if verbose >= 1:
-            logger.info(f"Training ensemble with {parallel_models} models")
-            logger.info(f"Train samples: {len(train_loaders[0].dataset)}, Val samples: {len(val_loaders[0].dataset) if val_loaders[0] else 0}")
+        # if verbose >= 1:
+        #     #logger.info(f"Training ensemble with {parallel_models} models")
+        #     #logger.info(f"Train samples: {len(train_loaders[0].dataset)}, Val samples: {len(val_loaders[0].dataset) if val_loaders[0] else 0}")
     
-        print("Network part...")
+        #print("Network part...")
         # Train the ensemble
         history = self.trainer.fit(
             train_loaders=train_loaders,  # Fixed parameter name
@@ -249,9 +249,13 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         if verbose >= 1:
             final_val_loss = results.get('final_val_loss')
             if final_val_loss is not None:
-                logger.info(f"Training completed. Best validation loss: {final_val_loss:.6f}")
+                #logger.info(f"Training completed. Best validation loss: {final_val_loss:.6f}")
+                pass
             else:
-                logger.info("Training completed.")
+
+                #logger.info("Training completed.")
+                a = 0
+                pass
         
         return results
     
@@ -273,7 +277,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                        if col not in ["TIME"] + [f"{self.target}_h{h}" for h in self.forecast_horizons]]
         
         self.input_dim = len(feature_cols)
-        logger.info(f"Input dimension: {self.input_dim} features")
+        #logger.info(f"Input dimension: {self.input_dim} features")
 
        
 
@@ -323,8 +327,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                     }
                     
                     if self.verbose >= 2:
-                        logger.info(f"Global normalization for {col}: mean={col_mean:.4f}, std={col_std:.4f}")
-            
+                        #logger.info(f"Global normalization for {col}: mean={col_mean:.4f}, std={col_std:.4f}")
+                        pass
             # Store the same global transformations for all countries
             for country in self.features_and_targets.keys():
                 self.transformations[country] = global_transformations.copy()
@@ -343,9 +347,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 
                 if self.verbose >= 2:
                     normalized_cols = [col for col in cols_to_normalize if col in df.columns]
-                    logger.info(f"Country {country}: Applied global normalization to {len(normalized_cols)} columns")
+                    #logger.info(f"Country {country}: Applied global normalization to {len(normalized_cols)} columns")
             
-            logger.info(f"Global normalization applied to {len(cols_to_normalize)} columns across all countries")
+            #logger.info(f"Global normalization applied to {len(cols_to_normalize)} columns across all countries")
 
     def _prefit(self) -> None:
          # First pass: split data for all countries
@@ -362,9 +366,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             self._fit_AR_models(df, country)
             for q_idx, q in enumerate(self.quantiles):  # Use enumerate to get proper index
                 for h_idx, h in enumerate(self.forecast_horizons):  # Use enumerate for horizons too
-                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params[0]
-                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params[1]
-                    
+                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params.iloc[0]
+                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params.iloc[1]
 
             idx += 1
 

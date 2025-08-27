@@ -1,5 +1,0 @@
-Target columns: ['prc_hicp_manr_CP00_h1']
-BG training shape: (214, 1403)
-BG test shape: (87, 1403)
-SK training shape: (214, 1403)
-SK test shape: (87, 1403)

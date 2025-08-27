@@ -73,7 +73,7 @@ class LQR:
         self.is_fitted = False
         self.best_alpha = alpha
         
-        logger.info(f"LQR initialized with {len(self.country_data)} countries")
+        #logger.info(f"LQR initialized with {len(self.country_data)} countries")
     
     def _prepare_data(self) -> None:
         """Prepare data with lags and forecast targets."""
@@ -128,7 +128,7 @@ class LQR:
 
         self.countries = np.array(all_countries)
         
-        logger.info(f"Data matrices built: {self.X.shape[0]} samples, {self.X.shape[1]} features")
+        #logger.info(f"Data matrices built: {self.X.shape[0]} samples, {self.X.shape[1]} features")
     
     def k_fold_validation(
         self,
@@ -162,7 +162,7 @@ class LQR:
         # Select best alpha based on validation results
         self.best_alpha = select_best_alpha(alpha_scores)
         
-        logger.info(f"Best alpha selected: {self.best_alpha}")
+        #logger.info(f"Best alpha selected: {self.best_alpha}")
         
         return self.best_alpha
 
@@ -179,7 +179,7 @@ class LQR:
         if self.seed is not None:
             set_seeds(self.seed)
         
-        logger.info(f"Validating {len(alphas)} alpha values with validation_size={validation_size}")
+        #logger.info(f"Validating {len(alphas)} alpha values with validation_size={validation_size}")
         
         # Perform country-level train/validation split  
         
@@ -224,7 +224,7 @@ class LQR:
         )
         
         # Fit model
-        logger.info(f"Fitting LQR with alpha={self.best_alpha}")
+        #logger.info(f"Fitting LQR with alpha={self.best_alpha}")
         self.model.fit(self.X, self.y)
         
         # Get coefficients
@@ -232,7 +232,7 @@ class LQR:
         
         self.is_fitted = True
         
-        logger.info("LQR model fitted successfully")
+        #logger.info("LQR model fitted successfully")
         
         return coef_df
     

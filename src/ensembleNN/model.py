@@ -139,7 +139,7 @@ class EnsembleNN(nn.Module):
             for _ in range(n_models)
         ])
 
-        logger.info(f"Created EnsembleFactorNN with {n_models} models")
+        #logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
 
     def forward(self, x: torch.Tensor, country_codes: torch.Tensor, return_ensemble: bool = True, per_model_inputs: bool = True) -> torch.Tensor:

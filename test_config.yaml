@@ -27,8 +27,8 @@ splits:
 runtime:
   allow_reload: true                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  max_cores: 6                         # or specify int
-  max_ram_gb: 8.0                      # or specify float
+  max_cores: 1                         # or specify int
+  max_ram_gb: 64.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
   mem_probe_fudge_mb: 200              # extra margin on top of probe
   retries: 1                           # automatic retries on failure
@@ -61,15 +61,15 @@ models:
       cv_splits: 5
 
   - type: lqr-per-country
-    enabled: false
+    enabled: true
     params:
       # LQR estimated separately for each country
       solver: huberized
-      alphas: [7.5, 10, 15, 20, 25, 30, 35]
+      alphas: [35]
       use_cv: true
       cv_splits: 5
   - type: ar-qr-per-country
-    enabled: true
+    enabled: false
     params:
       # AR-QR estimated separately for each country
       solver: huberized
@@ -79,29 +79,19 @@ models:
 
   - type: nn
     enabled: false
+    per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
       - name: v1
         params:
-          units_per_layer: [32, 32, 32]
+          units_per_layer: [32, 32, 32, 32, 32]
           activation: relu
           optimizer: adam
-          learning_rate: 5.0e-4
-          epochs: 200
-          batch_size: 64
-          patience: 30
-          parallel_models: 5
-          device: cpu
-          l2_penalty: 1.0e-4
-
-      - name: v2
-        params:
-          units_per_layer: [64, 64, 64, 64]
-          activation: relu
-          optimizer: adam
-          learning_rate: 2.0e-4
-          epochs: 400
-          batch_size: 64
+          learning_rate: 5.0e-5
+          epochs: 150
+          batch_size: 32
           patience: 50
           parallel_models: 10
           device: cpu
           l2_penalty: 1.0e-4
+          validation_size: 0.3
+

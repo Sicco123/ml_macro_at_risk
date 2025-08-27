@@ -144,7 +144,8 @@ from tqdm import tqdm
 # parquet
 import pyarrow.parquet as pq
 
-# === Import YOUR models exactly like in run_analysis.py ===
+# Global model cache for sharing trained models across countries in the same window
+_global_model_cache = {}
 try:
     from src.ensemble_nn_api import EnsembleNNAPI
     from src.lqr_api import LQRModel
@@ -299,7 +300,7 @@ def generate_windows(
 PROGRESS_COLUMNS = [
     "MODEL", "NN_VERSION", "QUANTILE", "HORIZON", "COUNTRY",
     "WINDOW_START", "WINDOW_END", "STATUS", "LAST_UPDATE",
-    "ERROR_MSG", "MODEL_PATH", "FORECAST_ROWS"
+    "ERROR_MSG", "MODEL_PATH", "FORECAST_ROWS", "IS_GLOBAL"
 ]
 
 def load_progress(path: Path) -> pd.DataFrame:
@@ -317,7 +318,8 @@ def upsert_progress_row(progress_path: Path, lock: FileLock, row: Dict[str, Any]
             (df["HORIZON"] == row["HORIZON"]) &
             (df["COUNTRY"] == row["COUNTRY"]) &
             (df["WINDOW_START"] == row["WINDOW_START"]) &
-            (df["WINDOW_END"] == row["WINDOW_END"])
+            (df["WINDOW_END"] == row["WINDOW_END"]) &
+            (df.get("IS_GLOBAL", False) == row.get("IS_GLOBAL", False))
         )
         df = df.loc[~mask]
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
@@ -352,17 +354,19 @@ def append_forecasts(out_path: Path, rows: pd.DataFrame) -> None:
 
 @dataclass(frozen=True)
 class TaskKey:
-    model: str                   # 'ar-qr' | 'lqr' | 'nn'
+    model: str                   # 'ar-qr' | 'lqr' | 'nn' | 'nn-global'
     nn_version: Optional[str]    # e.g., 'v1' | 'v2' for NN; None otherwise
     quantile: float
     horizon: int
-    country: str
+    country: str                 # For global models, this represents the prediction target country
     window_start: str            # 'YYYY-MM-DD'
     window_end: str              # 'YYYY-MM-DD'
+    is_global: bool = False      # True for global models that train on all countries
 
     def id(self) -> str:
         nv = self.nn_version or "-"
-        return f"{self.model}|{nv}|q={self.quantile}|h={self.horizon}|{self.country}|{self.window_start}_{self.window_end}"
+        global_suffix = "-global" if self.is_global else ""
+        return f"{self.model}{global_suffix}|{nv}|q={self.quantile}|h={self.horizon}|{self.country}|{self.window_start}_{self.window_end}"
 
 # ----------------------------- Worker -----------------------------
 
@@ -427,7 +431,7 @@ def _build_lqr_per_country(
     )
 
     # Optional CV for alpha - optimized for single country
-    if (not probe) and params.get("use_cv", False):
+    if  params.get("use_cv", False):
         alphas = params.get("alphas", [])
         if alphas:
             splits = int(params.get("cv_splits", 5))
@@ -476,7 +480,7 @@ def _build_lqr(
     )
 
     # Optional CV for alpha
-    if (not probe) and params.get("use_cv", False):
+    if params.get("use_cv", False):
         alphas = params.get("alphas", [])
         if alphas:
             splits = int(params.get("cv_splits", 5))
@@ -584,6 +588,56 @@ def _build_nn(
     )
     return mdl
 
+def _build_nn_global(
+    train_data_list: List[pd.DataFrame],
+    target: str,
+    quantile: float,
+    horizon: int,
+    lags: List[int],
+    nn_params: Dict[str, Any],
+    seed: int,
+    probe: bool,
+    country_names: List[str]
+) -> EnsembleNNAPI:
+    """
+    Construct and fit YOUR EnsembleNNAPI on multiple countries' data (global model).
+    For probe=True, we shorten epochs to 1 to keep memory usage minimal.
+    """
+    # YOUR API expects a list of dataframes (countries). For a global model we pass all countries' data.
+    mdl = EnsembleNNAPI(
+        data_list=train_data_list,
+        target=target,
+        quantiles=[quantile],
+        forecast_horizons=[horizon],
+        units_per_layer=list(nn_params.get("units_per_layer", [32, 32])),
+        lags=lags,
+        activation=nn_params.get("activation", "relu"),
+        device=nn_params.get("device", "cpu"),
+        seed=seed,
+        transform=True,
+        prefit_AR=bool(nn_params.get("prefit_AR", True)),  # Enable for global models
+        country_ids=country_names,  # Pass country names for global model
+        time_col="TIME",
+        verbose=0 if probe else 1
+    )
+
+    epochs = 1 if probe else int(nn_params.get("epochs", 100))
+    mdl.fit(
+        epochs=epochs,
+        learning_rate=float(nn_params.get("learning_rate", 1e-3)),
+        batch_size=int(nn_params.get("batch_size", 64)),
+        validation_size=float(nn_params.get("validation_size", 0.2)),
+        patience=int(nn_params.get("patience", 20)),
+        verbose=0,
+        optimizer=nn_params.get("optimizer", "adam"),
+        parallel_models=int(nn_params.get("parallel_models", 1)),
+        l2=float(nn_params.get("l2_penalty", 0.0)),
+        return_validation_loss=False,
+        return_train_loss=False,
+        shuffle=True
+    )
+    return mdl
+
 def _predict_nn_single(
     mdl: EnsembleNNAPI,
     full_country_df: pd.DataFrame,
@@ -644,6 +698,7 @@ def quantile_index(q: float, Q_dim: int, quantile_list: Optional[List[float]]) -
 def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> Tuple[TaskKey, str, Optional[str], int, Optional[pd.DataFrame]]:
     """
     Train/Load the model for one (model, nn_version, q, h, country, window) and emit a 1-row forecast DF.
+    For global models (is_global=True), trains once on all countries' data and caches the result.
     Returns (task, status, err_msg, n_rows, df_or_none)
     """
     progress_lock = FileLock(str(lock_path(paths["progress_parquet"])))
@@ -659,10 +714,11 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
             "WINDOW_START": task.window_start,
             "WINDOW_END": task.window_end,
             "STATUS": status,
-            "LAST_UPDATE": datetime.now(datetime.UTC).isoformat(),
+            "LAST_UPDATE": datetime.now().isoformat(),
             "ERROR_MSG": err,
             "MODEL_PATH": str(model_path) if model_path else None,
-            "FORECAST_ROWS": n_rows
+            "FORECAST_ROWS": n_rows,
+            "IS_GLOBAL": task.is_global
         }
         upsert_progress_row(paths["progress_parquet"], progress_lock, row)
         if err:
@@ -670,60 +726,188 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
 
     try:
         mark("training")
+        
         # Load country data
-        country_file = paths["countries"][task.country]
         time_col = cfg["data"].get("time_col", "TIME")
-        country_col = cfg["data"].get("country_col", "COUNTRY")
         target = cfg["data"]["target"]
-        df = read_df(country_file)
-        df = ensure_time_sorted(df, time_col)
-        df = handle_missing(df, cfg["data"].get("missing", "forward_fill_then_mean"))
-
-        # Train slice
+        
+        # Window timestamps
         ws = pd.Timestamp(task.window_start)
         we = pd.Timestamp(task.window_end)
-        train_df = df.loc[(df[time_col] >= ws) & (df[time_col] <= we)].copy()
-
-        if len(train_df) < int(cfg["splits"].get("min_train_points", 12)):
-            raise RuntimeError(f"Insufficient training points in window: {len(train_df)}")
-
-        # Ensure the target exists
-        if target not in df.columns:
-            raise RuntimeError(f"Target column '{target}' not found in data for {task.country}")
-
-        # Model artifact path
-        model_dir = paths["models_root"] / task.model / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"country={task.country}" / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+        
+        # Model artifact path - different for global vs per-country models
+        if task.is_global:
+            # For global models, store under a shared path (not country-specific for the model itself)
+            model_dir = paths["models_root"] / f"{task.model}-global" / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+        else:
+            model_dir = paths["models_root"] / task.model / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"country={task.country}" / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+        
         model_dir.mkdir(parents=True, exist_ok=True)
-        model_path = model_dir / "model.pkl"  # joblib pickle of YOUR model object
-
-        # Reload?
+        model_path = model_dir / "model.pkl"
+        
+        # Reload options
         reload_ok = bool(cfg["runtime"].get("allow_reload", True)) and not bool(cfg["runtime"].get("retrain_if_exists", False))
         model_obj = None
-        if reload_ok and model_path.exists():
+        
+        # For global models, check cache first, then disk
+        if task.is_global:
+            cache_key = f"{task.model}|{task.nn_version or '-'}|q={task.quantile}|h={task.horizon}|{task.window_start}_{task.window_end}"
+            if cache_key in _global_model_cache:
+                model_obj = _global_model_cache[cache_key]
+                logging.info(f"[CACHE] Using cached global model: {cache_key}")
+        
+        # Try loading from disk if not in cache
+        if model_obj is None and reload_ok and model_path.exists():
             try:
                 import joblib
                 model_obj = joblib.load(model_path)
-                logging.info(f"[CACHE] Loaded model: {model_path}")
+                logging.info(f"[CACHE] Loaded model from disk: {model_path}")
+                # Store in cache for future use
+                if task.is_global:
+                    _global_model_cache[cache_key] = model_obj
             except Exception as e:
                 logging.warning(f"[CACHE] Failed to load model at {model_path}, will retrain. Reason: {e}")
 
-        # Build lags (list of ints); if not provided and model=ar-qr, derive from window size
-        lags = cfg["data"].get("lags") 
+        # Build lags
+        lags = cfg["data"].get("lags")
+
         # Train if needed
         if model_obj is None:
-            if task.model == "lqr":
-                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_lqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=False)
-            elif task.model == "ar-qr":
-                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_arqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=False)
-            elif task.model == "lqr-per-country":
-                model_obj = _build_lqr_per_country(train_df, target, task.quantile, task.horizon, lags, cfg_for_lqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=False)
-            elif task.model == "ar-qr-per-country":
-                model_obj = _build_lqr_per_country(train_df, target, task.quantile, task.horizon, lags, cfg_for_arqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=False)
-            elif task.model == "nn":
+            if task.is_global and task.model == "nn":
+                # 1) Build training data for all eligible countries
+                all_train_data = []
+                country_names = []
+                time_col = cfg["data"].get("time_col", "TIME")
+                target = cfg["data"]["target"]
+                ws, we = pd.Timestamp(task.window_start), pd.Timestamp(task.window_end)
+
+                for country, country_file in paths["countries"].items():
+                    dfc = read_df(country_file)
+                    dfc = ensure_time_sorted(dfc, time_col)
+                    dfc = handle_missing(dfc, cfg["data"].get("missing", "forward_fill_then_mean"))
+                    if target not in dfc.columns:
+                        logging.warning(f"[GLOBAL NN] Missing target '{target}' in {country}, skipping")
+                        continue
+                    train_df = dfc.loc[(dfc[time_col] >= ws) & (dfc[time_col] <= we)].copy()
+                    if len(train_df) < int(cfg["splits"].get("min_train_points", 12)):
+                        logging.warning(f"[GLOBAL NN] Too few points in {country} ({len(train_df)}), skipping")
+                        continue
+                    all_train_data.append(train_df)
+                    country_names.append(country)
+
+                if not all_train_data:
+                    raise RuntimeError("No countries with sufficient data for global NN training.")
+
+                # 2) Train or load ONCE (file-locked)
                 nn_params = cfg_for_nn_version(cfg, task.nn_version)
-                model_obj = _build_nn(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), probe=False)
+                cache_key = f"{task.model}|{task.nn_version or '-'}|q={task.quantile}|h={task.horizon}|{task.window_start}_{task.window_end}"
+                model_dir = paths["models_root"] / f"{task.model}-global" / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+                model_dir.mkdir(parents=True, exist_ok=True)
+                model_path = model_dir / "model.pkl"
+
+                import joblib
+                model_obj = None
+                if cache_key in _global_model_cache:
+                    model_obj = _global_model_cache[cache_key]
+
+                if model_obj is None:
+                    model_lock = FileLock(str(lock_path(model_path)))
+                    with model_lock:
+                        if bool(cfg["runtime"].get("allow_reload", True)) and model_path.exists():
+                            logging.info(f"[GLOBAL NN] Loading cached model: {model_path}")
+                            model_obj = joblib.load(model_path)
+                        else:
+                            logging.info(f"[GLOBAL NN] Training model -> {model_path}")
+                            lags = cfg["data"].get("lags")
+                            model_obj = _build_nn_global(
+                                all_train_data, target, task.quantile, task.horizon, lags,
+                                nn_params, seed=int(cfg.get("seed", 42)), probe=False,
+                                country_names=country_names
+                            )
+                            try:
+                                joblib.dump(model_obj, model_path)
+                            except Exception as e:
+                                logging.warning(f"[SAVE] Could not pickle global NN: {e}")
+                    _global_model_cache[cache_key] = model_obj
+
+                # 3) Predict for ALL countries and build one output DataFrame
+                rows = []
+                for country, country_file in paths["countries"].items():
+                    dfc = read_df(country_file)
+                    dfc = ensure_time_sorted(dfc, time_col)
+                    dfc = handle_missing(dfc, cfg["data"].get("missing", "forward_fill_then_mean"))
+                    if target not in dfc.columns:
+                        continue
+
+                    # locate window_end by position, then t+h
+                    idx_end = dfc.index[dfc[time_col] == we]
+                    if len(idx_end) == 0:
+                        continue
+                    i = int(idx_end[0])
+                    k = i + task.horizon
+                    if k >= len(dfc):
+                        continue
+
+                    t_forecast = pd.Timestamp(dfc.iloc[k][time_col])
+                    true_val = float(dfc.iloc[k][target]) if target in dfc.columns else np.nan
+                    try:
+                        yhat = _predict_nn_single(model_obj, dfc, country, time_col, we, task.horizon, task.quantile)
+                    except Exception as e:
+                        logging.warning(f"[GLOBAL NN] Predict failed for {country}: {e}")
+                        continue
+
+                    rows.append({
+                        "TIME": t_forecast,
+                        "COUNTRY": country,
+                        "TRUE_DATA": true_val,
+                        "FORECAST": float(yhat),
+                        "HORIZON": task.horizon,
+                        "QUANTILE": task.quantile,
+                        "MODEL": "nn-global",
+                        "NN_VERSION": task.nn_version or "",
+                        "WINDOW_START": task.window_start,
+                        "WINDOW_END": task.window_end,
+                    })
+
+                if not rows:
+                    raise RuntimeError("Global NN produced no forecasts.")
+
+                out_df = pd.DataFrame(rows)
+
+                # 4) Mark + return once with all rows
+                mark("done", err=None, model_path=model_path, n_rows=len(out_df))
+                return (task, "done", None, len(out_df), out_df)
+                
             else:
-                raise ValueError(f"Unknown model type: {task.model}")
+                # Non-global models (existing logic)
+                country_file = paths["countries"][task.country]
+                df = read_df(country_file)
+                df = ensure_time_sorted(df, time_col)
+                df = handle_missing(df, cfg["data"].get("missing", "forward_fill_then_mean"))
+
+                # Train slice
+                train_df = df.loc[(df[time_col] >= ws) & (df[time_col] <= we)].copy()
+
+                if len(train_df) < int(cfg["splits"].get("min_train_points", 12)):
+                    raise RuntimeError(f"Insufficient training points in window: {len(train_df)}")
+
+                # Ensure the target exists
+                if target not in df.columns:
+                    raise RuntimeError(f"Target column '{target}' not found in data for {task.country}")
+
+                if task.model == "lqr":
+                    model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_lqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=False)
+                elif task.model == "ar-qr":
+                    model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_arqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=False)
+                elif task.model == "lqr-per-country":
+                    model_obj = _build_lqr_per_country(train_df, target, task.quantile, task.horizon, lags, cfg_for_lqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=False)
+                elif task.model == "ar-qr-per-country":
+                    model_obj = _build_lqr_per_country(train_df, target, task.quantile, task.horizon, lags, cfg_for_arqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=False)
+                elif task.model == "nn":
+                    nn_params = cfg_for_nn_version(cfg, task.nn_version)
+                    model_obj = _build_nn(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), probe=False)
+                else:
+                    raise ValueError(f"Unknown model type: {task.model}")
 
             # Save artifact (best-effort)
             try:
@@ -732,6 +916,12 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
             except Exception as e:
                 logging.warning(f"[SAVE] Could not pickle model to {model_path}: {e}")
 
+        # Generate forecast for the target country
+        country_file = paths["countries"][task.country]
+        df = read_df(country_file)
+        df = ensure_time_sorted(df, time_col)
+        df = handle_missing(df, cfg["data"].get("missing", "forward_fill_then_mean"))
+        
         # Forecast for t = window_end + horizon
         # True value (if available)
         full_df = df
@@ -756,6 +946,7 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
         else:
             raise ValueError(f"Unknown model type for prediction: {task.model}")
 
+        model_name = f"{task.model}-global" if task.is_global else task.model
         out = pd.DataFrame({
             "TIME": [t_forecast],
             "COUNTRY": [task.country],
@@ -763,7 +954,7 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
             "FORECAST": [float(yhat)],
             "HORIZON": [task.horizon],
             "QUANTILE": [task.quantile],
-            "MODEL": [task.model],
+            "MODEL": [model_name],
             "NN_VERSION": [task.nn_version or ""],
             "WINDOW_START": [task.window_start],
             "WINDOW_END": [task.window_end],
@@ -812,6 +1003,13 @@ def cfg_for_nn_versions(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]
             return [(v.get("name"), v.get("params", {})) for v in versions]
     return []
 
+def cfg_for_nn_per_country(cfg: Dict[str, Any]) -> bool:
+    """Check if NN models should be trained per country (True) or globally (False)"""
+    for m in cfg.get("models", []):
+        if m.get("type") == "nn" and m.get("enabled", False):
+            return bool(m.get("per_country", True))  # Default to True (per-country)
+    return True
+
 def cfg_for_nn_version(cfg: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
     versions = cfg_for_nn_versions(cfg)
     for n, p in versions:
@@ -841,45 +1039,62 @@ def plan_tasks(cfg: Dict[str, Any], paths: Dict[str, Path]) -> Tuple[List[Planne
 
     planned: List[PlannedTask] = []
 
-    # Which model specs are enabled
-    enabled_models: List[Tuple[str, Optional[str]]] = []
+    enabled_models: List[Tuple[str, Optional[str], bool]] = []
     for m in cfg.get("models", []):
         if not m.get("enabled", False):
             continue
-        t = m.get("type")
-        if t == "nn":
+        if m.get("type") == "nn":
+            per_country = bool(m.get("per_country", True))
+            is_global = not per_country
             for vname, _ in cfg_for_nn_versions(cfg):
-                enabled_models.append(("nn", vname))
+                enabled_models.append(("nn", vname, is_global))
         else:
-            enabled_models.append((t, None))
+            enabled_models.append((m.get("type"), None, False))
 
-    for country, path in countries.items():
-        df = ensure_time_sorted(read_df(path), time_col)
-        dates = df[time_col]
-        if str(rw.get("start", "auto")).lower() == "auto":
-            start_date = pd.Timestamp(cfg["splits"]["test_cutoff"])
-        else:
-            start_date = pd.Timestamp(rw["start"])
-        if str(rw.get("end", "auto")).lower() == "auto":
-            end_date = dates.iloc[-1]
-        else:
-            end_date = pd.Timestamp(rw["end"])
-        for h in horizons:
-            windows = generate_windows(dates, size=size, step=step, start_date=start_date, end_date=end_date, horizon=h)
-            for (wstart, wend, _ftime) in windows:
-                for q in quantiles:
-                    for (model_type, nn_ver) in enabled_models:
-                        tk = TaskKey(
-                            model=model_type,
-                            nn_version=nn_ver,
-                            quantile=q,
-                            horizon=h,
-                            country=country,
-                            window_start=str(wstart.date()),
-                            window_end=str(wend.date()),
-                        )
-                        planned.append(PlannedTask(key=tk))
+    # Build windows ONCE (any country’s calendar will do for boundaries; use union via a reference file)
+    # Using the first country’s dates for simplicity:
+    ref_country, ref_path = next(iter(countries.items()))
+    ref_df = ensure_time_sorted(read_df(ref_path), time_col)
+    dates = ref_df[time_col]
+    start_date = pd.Timestamp(cfg["splits"]["test_cutoff"]) if str(rw.get("start", "auto")).lower() == "auto" else pd.Timestamp(rw["start"])
+    end_date = dates.iloc[-1] if str(rw.get("end", "auto")).lower() == "auto" else pd.Timestamp(rw["end"])
+
+    for h in horizons:
+        windows = generate_windows(dates, size=size, step=step, start_date=start_date, end_date=end_date, horizon=h)
+        for (wstart, wend, _ftime) in windows:
+            for q in quantiles:
+                for (model_type, nn_ver, is_global) in enabled_models:
+                    if is_global and model_type == "nn":
+                        # ONE global task per (window, q, h, version)
+                        planned.append(PlannedTask(
+                            key=TaskKey(
+                                model="nn",
+                                nn_version=nn_ver,
+                                quantile=q,
+                                horizon=h,
+                                country="__ALL__",          # sentinel
+                                window_start=str(wstart.date()),
+                                window_end=str(wend.date()),
+                                is_global=True
+                            )
+                        ))
+                    else:
+                        # per-country tasks as before
+                        for country in countries.keys():
+                            planned.append(PlannedTask(
+                                key=TaskKey(
+                                    model=model_type,
+                                    nn_version=nn_ver,
+                                    quantile=q,
+                                    horizon=h,
+                                    country=country,
+                                    window_start=str(wstart.date()),
+                                    window_end=str(wend.date()),
+                                    is_global=False
+                                )
+                            ))
     return planned, paths
+
 
 def memory_probe_for_group(
     sample_key: TaskKey,
@@ -889,32 +1104,51 @@ def memory_probe_for_group(
     """
     Builds a minimal model for the sample_key with probe=True and measures RSS delta.
     """
-    country_file = paths["countries"][sample_key.country]
     time_col = cfg["data"].get("time_col", "TIME")
     target = cfg["data"]["target"]
-    df = ensure_time_sorted(read_df(country_file), time_col)
     ws = pd.Timestamp(sample_key.window_start)
     we = pd.Timestamp(sample_key.window_end)
-    train_df = df.loc[(df[time_col] >= ws) & (df[time_col] <= we)].copy()
-
-    lags = cfg["data"].get("lags") 
-
-
+    lags = cfg["data"].get("lags")
 
     def _probe():
-        if sample_key.model == "lqr":
-            _ = _build_lqr(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_lqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=True)
-        elif sample_key.model == "ar-qr":
-            _ = _build_lqr(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_arqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=True)
-        elif sample_key.model == "lqr-per-country":
-            _ = _build_lqr_per_country(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_lqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=True)
-        elif sample_key.model == "ar-qr-per-country":
-            _ = _build_lqr_per_country(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_arqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=True)
-        elif sample_key.model == "nn":
-            nn_params = cfg_for_nn_version(cfg, sample_key.nn_version)
-            _ = _build_nn(train_df, target, sample_key.quantile, sample_key.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), probe=True)
+        if sample_key.is_global and sample_key.model == "nn":
+            # For global models, load data from all countries
+            all_train_data = []
+            country_names = []
+            
+            for country, country_file in paths["countries"].items():
+                df = ensure_time_sorted(read_df(country_file), time_col)
+                train_df = df.loc[(df[time_col] >= ws) & (df[time_col] <= we)].copy()
+                if len(train_df) >= 12 and target in df.columns:  # Minimal check
+                    all_train_data.append(train_df)
+                    country_names.append(country)
+            
+            if len(all_train_data) > 0:
+                nn_params = cfg_for_nn_version(cfg, sample_key.nn_version)
+                _ = _build_nn_global(
+                    all_train_data, target, sample_key.quantile, sample_key.horizon, lags, 
+                    nn_params, seed=int(cfg.get("seed", 42)), probe=True, 
+                    country_names=country_names
+                )
         else:
-            raise ValueError(f"Unknown model: {sample_key.model}")
+            # Non-global models (existing logic)
+            country_file = paths["countries"][sample_key.country]
+            df = ensure_time_sorted(read_df(country_file), time_col)
+            train_df = df.loc[(df[time_col] >= ws) & (df[time_col] <= we)].copy()
+
+            if sample_key.model == "lqr":
+                _ = _build_lqr(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_lqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=True)
+            elif sample_key.model == "ar-qr":
+                _ = _build_lqr(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_arqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=True)
+            elif sample_key.model == "lqr-per-country":
+                _ = _build_lqr_per_country(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_lqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=False, probe=True)
+            elif sample_key.model == "ar-qr-per-country":
+                _ = _build_lqr_per_country(train_df, target, sample_key.quantile, sample_key.horizon, lags, cfg_for_arqr_per_country(cfg), seed=int(cfg.get("seed", 42)), ar_only=True, probe=True)
+            elif sample_key.model == "nn":
+                nn_params = cfg_for_nn_version(cfg, sample_key.nn_version)
+                _ = _build_nn(train_df, target, sample_key.quantile, sample_key.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), probe=True)
+            else:
+                raise ValueError(f"Unknown model: {sample_key.model}")
 
     mb = estimate_memory_mb(_probe)
     mb += int(cfg["runtime"].get("mem_probe_fudge_mb", 200))
@@ -922,13 +1156,20 @@ def memory_probe_for_group(
 
 def estimate_memory_for_tasks(planned: List[PlannedTask], cfg: Dict[str, Any], paths: Dict[str, Path]) -> None:
     """
-    To stay efficient, perform one probe per (model, nn_version, country) group and reuse its estimate.
+    To stay efficient, perform one probe per (model, nn_version, country, is_global) group and reuse its estimate.
+    For global models, the memory usage will be higher but shared across all countries in the same window.
     """
-    groups: Dict[Tuple[str, Optional[str], str], List[int]] = {}
+    groups: Dict[Tuple[str, Optional[str], str, bool], List[int]] = {}
     for idx, pt in enumerate(planned):
-        k = (pt.key.model, pt.key.nn_version, pt.key.country)
+        # For global models, we group by (model, nn_version, 'global', True)
+        # For per-country models, we group by (model, nn_version, country, False)
+        if pt.key.is_global:
+            k = (pt.key.model, pt.key.nn_version, 'global', True)
+        else:
+            k = (pt.key.model, pt.key.nn_version, pt.key.country, False)
         groups.setdefault(k, []).append(idx)
-    for (model, nnv, country), indices in tqdm(groups.items(), desc="Memory probe groups"):
+    
+    for (model, nnv, country_or_global, is_global), indices in tqdm(groups.items(), desc="Memory probe groups"):
         sample_idx = indices[0]
         sample_key = planned[sample_idx].key
         mb = memory_probe_for_group(sample_key, cfg, paths)
@@ -973,12 +1214,16 @@ def run_scheduler(planned: List[PlannedTask], cfg: Dict[str, Any], paths: Dict[s
                 (progress_df["COUNTRY"] == tk.country) &
                 (progress_df["WINDOW_START"] == tk.window_start) &
                 (progress_df["WINDOW_END"] == tk.window_end) &
+                (progress_df.get("IS_GLOBAL", False) == tk.is_global) &
                 (progress_df["STATUS"] == "done")
             )
             if m.any():
                 continue
         # Skip if artifact exists and allow_reload without retrain
-        model_dir = paths["models_root"] / tk.model / (f"nn_version={tk.nn_version}" if tk.nn_version else "default") / f"country={tk.country}" / f"q={tk.quantile}" / f"h={tk.horizon}" / f"window_{tk.window_start}_{tk.window_end}"
+        if tk.is_global:
+            model_dir = paths["models_root"] / f"{tk.model}-global" / (f"nn_version={tk.nn_version}" if tk.nn_version else "default") / f"q={tk.quantile}" / f"h={tk.horizon}" / f"window_{tk.window_start}_{tk.window_end}"
+        else:
+            model_dir = paths["models_root"] / tk.model / (f"nn_version={tk.nn_version}" if tk.nn_version else "default") / f"country={tk.country}" / f"q={tk.quantile}" / f"h={tk.horizon}" / f"window_{tk.window_start}_{tk.window_end}"
         model_path = model_dir / "model.pkl"
         if cfg["runtime"].get("allow_reload", True) and not cfg["runtime"].get("retrain_if_exists", False) and model_path.exists():
             # Mark as done to reflect cache
@@ -991,10 +1236,11 @@ def run_scheduler(planned: List[PlannedTask], cfg: Dict[str, Any], paths: Dict[s
                 "WINDOW_START": tk.window_start,
                 "WINDOW_END": tk.window_end,
                 "STATUS": "done",
-                "LAST_UPDATE": datetime.now(datetime.UTC).isoformat(),
+                "LAST_UPDATE": datetime.now().isoformat(),
                 "ERROR_MSG": None,
                 "MODEL_PATH": str(model_path),
-                "FORECAST_ROWS": 0
+                "FORECAST_ROWS": 0,
+                "IS_GLOBAL": tk.is_global
             }
             upsert_progress_row(paths["progress_parquet"], FileLock(str(lock_path(paths["progress_parquet"]))), row)
             continue
@@ -1030,6 +1276,7 @@ def run_scheduler(planned: List[PlannedTask], cfg: Dict[str, Any], paths: Dict[s
                 pt = filtered[next_i]
                 need = pt.mem_est_mb
                 if need <= mem_gate.avail:
+                  
                     mem_gate.acquire(need)
                     worker_paths = {
                         "progress_parquet": paths["progress_parquet"],
@@ -1149,7 +1396,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.dry_run:
         # Show first few planned tasks with mem estimates
         print("---- DRY RUN (first 20 tasks) ----")
-        for pt in planned[:5]:
+        for pt in planned[:20]:
             print({
                 "MODEL": pt.key.model,
                 "NN_VERSION": pt.key.nn_version,
@@ -1158,6 +1405,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "COUNTRY": pt.key.country,
                 "WIN_START": pt.key.window_start,
                 "WIN_END": pt.key.window_end,
+                "IS_GLOBAL": pt.key.is_global,
                 "EST_MB": pt.mem_est_mb,
             })
         return 0

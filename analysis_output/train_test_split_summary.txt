@@ -1,9 +1,0 @@
-Train/test split created:
-  Training countries: 25
-  Test countries: 25
-  Dropped countries: []
-
-Split sizes:
-  BG: 215 train, 88 test
-  SK: 215 train, 88 test
-  FI: 215 train, 88 test

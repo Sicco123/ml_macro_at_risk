@@ -1,4 +1,0 @@
-Prediction Generation Summary:
-FNN predictions: 25 countries
-LQR predictions: 25 countries  
-LQR AR predictions: 25 countries

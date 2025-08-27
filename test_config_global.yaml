@@ -1,0 +1,96 @@
+# ============================
+# Rolling Window Forecast Config with Global NN
+# ============================
+
+seed: 123
+
+data:
+  path: processed_per_country          # folder containing one file per country (CSV/Parquet)
+  time_col: TIME
+  country_col: COUNTRY                 # optional; if missing we infer from filename
+  target: prc_hicp_manr_CP00
+  lags: []               # if empty, defaults to 1..window_size
+  horizons: [1]
+  quantiles: [0.1]
+  missing: forward_fill_then_mean      # forward fill, then mean imputation
+
+rolling_window:
+  size: 120                             # training window size (in periods)
+  step: 1                              # how many periods to advance the window
+  start: auto                          # 'auto' => use splits.test_cutoff
+  end: auto                            # 'auto' => last available date
+
+splits:
+  test_cutoff: "2017-12-01"            # if rolling_window.start == auto
+  min_train_points: 24                 # minimum obs required to train
+
+runtime:
+  allow_reload: true                  # load existing model if present
+  retrain_if_exists: false             # force retrain if model already exists
+  max_cores: 7                         # or specify int
+  max_ram_gb: 8.0                      # or specify float
+  safety_ram_fraction: 0.8             # fraction of total RAM usable
+  mem_probe_fudge_mb: 200              # extra margin on top of probe
+  retries: 1                           # automatic retries on failure
+  thread_pinning: true                 # restrict MKL/OMP threads to 1
+  progress_refresh_sec: 5
+
+io:
+  output_root: outputs
+  models_dir: models
+  forecasts_dir: forecasts
+  progress_parquet: progress/progress.parquet
+  errors_parquet: progress/errors.parquet
+  logs_dir: logs
+
+models:
+  - type: ar-qr
+    enabled: false
+    params:
+      solver: huberized
+      alphas: [0.0]
+      use_cv: true
+      cv_splits: 5
+
+  - type: lqr
+    enabled: false
+    params:
+      solver: huberized
+      alphas: [7.5, 10, 15, 20, 25, 30, 35, 40]
+      use_cv: true
+      cv_splits: 5
+
+  - type: lqr-per-country
+    enabled: true
+    params:
+      # LQR estimated separately for each country
+      solver: huberized
+      alphas: [7.5, 10, 15, 20, 25, 30, 35]
+      use_cv: true
+      cv_splits: 5
+  - type: ar-qr-per-country
+    enabled: true
+    params:
+      # AR-QR estimated separately for each country
+      solver: huberized
+      alphas: [0]
+      use_cv: false
+      cv_splits: 5
+
+  - type: nn
+    enabled: true
+    per_country: false  # true = train separate model for each country, false = train global model on all countries
+    versions:
+      - name: v1
+        params:
+          units_per_layer: [32, 32, 32, 32, 32]
+          activation: relu
+          optimizer: adam
+          learning_rate: 5.0e-5
+          epochs: 1500
+          batch_size: 32
+          patience: 50
+          parallel_models: 10
+          device: cpu
+          l2_penalty: 1.0e-4
+
