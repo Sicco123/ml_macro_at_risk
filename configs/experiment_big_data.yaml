@@ -16,7 +16,7 @@ data:
 splits:
   validation_size: 0.3             # fraction of each country's data for validation
   train_start: "1997-01-01"
-  test_cutoff: "2017-12-01"         # last date in training; all later dates are test
+  test_cutoff: "2016-01-01"         # last date in training; all later dates are test
   min_train_points: 12              # enforce minimum per country
 
 ensemble_nn:
@@ -34,7 +34,7 @@ ensemble_nn:
   l2_penalty: 0.0001 
 
 lqr:
-  alphas: [ 7.5, 10, 15, 20, 25, 30, 35]
+  alphas: [ 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
   solver: huberized
   rff_features: 1000
   rolling: false

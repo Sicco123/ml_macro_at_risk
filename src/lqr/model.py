@@ -345,7 +345,13 @@ def cross_validate_alpha(
     """
     alpha_scores = {}
     kf = KFold(n_splits=cv_folds, shuffle=True, random_state=seed)
-    
+
+    # shuffle X and y and set seed
+    np.random.seed(seed)
+    mask = np.random.permutation(X.shape[0])
+    X = X[mask]
+    y = y[mask]
+
     for alpha in alphas:
         all_scores = []
         
