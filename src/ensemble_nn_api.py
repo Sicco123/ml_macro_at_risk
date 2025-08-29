@@ -258,7 +258,15 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 pass
         
         return results
-    
+
+    def save_model(self, path: Union[str, Path]) -> None:
+        if self.model is not None:
+            torch.save(self.model.state_dict(), path)
+
+    def load_model(self, path: Union[str, Path]) -> None:
+        if self.model is not None:
+            self.model.load_state_dict(torch.load(path))
+
     def _prepare_data(self) -> None:
 
         # create lagged features
@@ -374,21 +382,53 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         self.features_and_targets = self._per_quantile_per_horizon_targets(self.features_and_targets)
         
         return intercepts, phis
+    
+    # def _per_quantile_per_horizon_targets(self, features_and_targets):
+    #     horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons]
+
+    #     for country, df in features_and_targets.items():
+    #         for q in self.quantiles:
+    #             for col in horizon_targets:
+    #                 df[f'{col}_q{q}'] = df[col] 
+    #         # remove horizon targets from df
+      
+    #         for col in horizon_targets:
+    #             if f"{col}_q{q}" in df.columns:
+    #                 df.drop(columns=[f"{col}"], inplace=True)
+
+    #     return features_and_targets
+
 
     def _per_quantile_per_horizon_targets(self, features_and_targets):
         horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons]
+        out = {}
 
         for country, df in features_and_targets.items():
+            # Work only with target columns that actually exist
+            tgt_cols = [c for c in horizon_targets if c in df.columns]
+            if not tgt_cols:
+                out[country] = df.copy()  # keep a compact copy
+                continue
 
+            # Build all quantile copies at once
+            quantile_blocks = []
             for q in self.quantiles:
-                for col in horizon_targets:
-                    df[f'{col}_q{q}'] = df[col] 
-            # remove horizon targets from df
-      
-            for col in horizon_targets:
-                if f"{col}_q{q}" in df.columns:
-                    df.drop(columns=[f"{col}"], inplace=True)
-        return features_and_targets
+                block = df[tgt_cols].copy()
+                block.columns = [f"{c}_q{q}" for c in tgt_cols]
+                quantile_blocks.append(block)
+
+            added = pd.concat(quantile_blocks, axis=1)
+
+            # Combine: original (minus targets) + new quantile columns
+            base = df.drop(columns=tgt_cols)
+            new_df = pd.concat([base, added], axis=1)
+
+            # Remove any accidental duplicate columns and defragment
+            new_df = new_df.loc[:, ~new_df.columns.duplicated()].copy()
+
+            out[country] = new_df
+
+        return out
         
 
     def _fit_AR_models(self, df: pd.DataFrame, country) -> Dict[str, Dict[float, Dict[str, sm.regression.quantile_regression.QuantRegResults]]]:

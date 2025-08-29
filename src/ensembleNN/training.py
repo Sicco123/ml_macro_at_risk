@@ -264,23 +264,7 @@ class EnsembleNNTrainer:
             Training history
         """
 
-         # Compile the model for faster execution (PyTorch 2.0+)
-        if hasattr(torch, 'compile'):
-            try:
-                print("compiling")
-                # Compile with different modes based on your needs
-                self.model = torch.compile(
-                    self.model, 
-                    mode='reduce-overhead',  # Options: 'default', 'reduce-overhead', 'max-autotune'
-                    fullgraph=True,  # Try to compile the entire graph
-                    dynamic=False    # Assume fixed input shapes for better optimization
-                )
-                if verbose >= 1:
-                    logger.info("Model compiled with torch.compile")
-            except Exception as e:
-                if verbose >= 1:
-                    logger.warning(f"Failed to compile model: {e}")
-     
+       
 
         optimizer = self._get_optimizer(optimizer_type, learning_rate)
         early_stopping = EarlyStopping(patience, ensemble_size=self.model.n_models) if val_loader is not None else None

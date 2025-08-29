@@ -13,6 +13,7 @@ runtime:
 io:
   data_path: processed_per_country # directory with per-country parquet/csv
   output_root: parallel_outputs    # root folder
+  scratch_dir: /scratch-local/skooiker/ml_macro_at_risk  # optional: scratch directory for faster I/O
   models_dir: models
   forecasts_dir: forecasts
   progress_dir: progress

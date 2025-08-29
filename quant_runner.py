@@ -373,11 +373,11 @@ class TaskKey:
 def worker_init(thread_pinning: bool = True):
     # CPU-only; pin threads in BLAS stacks to avoid oversubscription
     if thread_pinning:
-        os.environ.setdefault("OMP_NUM_THREADS", "1")
-        os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-        os.environ.setdefault("MKL_NUM_THREADS", "1")
-        os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-        os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+        os.environ.setdefault("OMP_NUM_THREADS", "4")
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+        os.environ.setdefault("MKL_NUM_THREADS", "4")
+        os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
 
 def estimate_memory_mb(callable_fn, *args, **kwargs) -> int:
     """Rudimentary RSS delta probe around callable_fn()."""
@@ -812,23 +812,22 @@ def execute_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path]) -> 
                     model_obj = _global_model_cache[cache_key]
 
                 if model_obj is None:
-                    model_lock = FileLock(str(lock_path(model_path)))
-                    with model_lock:
-                        if bool(cfg["runtime"].get("allow_reload", True)) and model_path.exists():
-                            logging.info(f"[GLOBAL NN] Loading cached model: {model_path}")
-                            model_obj = joblib.load(model_path)
-                        else:
-                            logging.info(f"[GLOBAL NN] Training model -> {model_path}")
-                            lags = cfg["data"].get("lags")
-                            model_obj = _build_nn_global(
-                                all_train_data, target, task.quantile, task.horizon, lags,
-                                nn_params, seed=int(cfg.get("seed", 42)), probe=False,
-                                country_names=country_names
-                            )
-                            try:
-                                joblib.dump(model_obj, model_path)
-                            except Exception as e:
-                                logging.warning(f"[SAVE] Could not pickle global NN: {e}")
+                   
+                    if bool(cfg["runtime"].get("allow_reload", True)) and model_path.exists():
+                        logging.info(f"[GLOBAL NN] Loading cached model: {model_path}")
+                        model_obj = joblib.load(model_path)
+                    else:
+                        logging.info(f"[GLOBAL NN] Training model -> {model_path}")
+                        lags = cfg["data"].get("lags")
+                        model_obj = _build_nn_global(
+                            all_train_data, target, task.quantile, task.horizon, lags,
+                            nn_params, seed=int(cfg.get("seed", 42)), probe=False,
+                            country_names=country_names
+                        )
+                        try:
+                            joblib.dump(model_obj, model_path)
+                        except Exception as e:
+                            logging.warning(f"[SAVE] Could not pickle global NN: {e}")
                     _global_model_cache[cache_key] = model_obj
 
                 # 3) Predict for ALL countries and build one output DataFrame
@@ -1296,34 +1295,39 @@ def run_scheduler(planned: List[PlannedTask], cfg: Dict[str, Any], paths: Dict[s
             # Collect a completion (with periodic timeout to keep loop active)
             timeout = max(0.5, float(cfg["runtime"].get("progress_refresh_sec", 5)))
             collected = False
-            for fut in as_completed(list(running.keys()), timeout=timeout):
-                pt, need = running.pop(fut)
-                mem_gate.release(need)
-                try:
-                    task, status, err, n_rows, rows = fut.result()
-                except Exception as e:
-                    task = pt.key
-                    status = "failed"
-                    err = f"{type(e).__name__}: {e}"
-                    n_rows = 0
-                    rows = None
+            try:
+                for fut in as_completed(list(running.keys()), timeout=timeout):
+                    pt, need = running.pop(fut)
+                    mem_gate.release(need)
+                    try:
+                        task, status, err, n_rows, rows = fut.result()
+                    except Exception as e:
+                        task = pt.key
+                        status = "failed"
+                        err = f"{type(e).__name__}: {e}"
+                        n_rows = 0
+                        rows = None
 
-                if status == "done" and rows is not None and n_rows > 0:
-                    # Append to parquet for (q,h)
-                    q = task.quantile
-                    h = task.horizon
-                    out_path = paths["forecasts_root"] / f"q={q}" / f"h={h}" / "rolling_window.parquet"
-                    append_forecasts(out_path, rows)
-                else:
-                    # retry?
-                    tid = task.id()
-                    a = attempts.get(tid, 0)
-                    if a < int(cfg["runtime"].get("retries", 1)):
-                        attempts[tid] = a + 1
-                        filtered.append(pt)
-                pbar.update(1)
-                collected = True
-                break
+                    if status == "done" and rows is not None and n_rows > 0:
+                        # Append to parquet for (q,h)
+                        q = task.quantile
+                        h = task.horizon
+                        out_path = paths["forecasts_root"] / f"q={q}" / f"h={h}" / "rolling_window.parquet"
+                        append_forecasts(out_path, rows)
+                    else:
+                        # retry?
+                        tid = task.id()
+                        a = attempts.get(tid, 0)
+                        if a < int(cfg["runtime"].get("retries", 1)):
+                            attempts[tid] = a + 1
+                            filtered.append(pt)
+                    pbar.update(1)
+                    collected = True
+                    break
+            except TimeoutError:
+                # No futures completed within timeout period - this is normal for long-running tasks
+                # Just continue the loop and check again
+                pass
 
             if not launched and not collected:
                 # brief idle
