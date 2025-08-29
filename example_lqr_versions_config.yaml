@@ -1,0 +1,85 @@
+# Example configuration showing different ways to create LQR versions
+
+models:
+  # Multiple AR-QR versions with different configurations
+  - type: ar-qr
+    enabled: true
+    versions:
+      - name: default
+        params:
+          solver: huberized
+          alphas: [0.0]
+          use_cv: false
+          cv_splits: 5
+     
+
+  # Multiple LQR versions with different regularization strategies
+  - type: lqr
+    enabled: true
+    versions:
+      # Version 1: Low regularization
+      - name: low_reg
+        params:
+          solver: huberized
+          alphas: [7.5, 10.0, 12.5, 15.0, 17.5, 20.0, 22.5, 25, 27.5, 30.0, 32.5, 35.0, 37.5, 40.0, 42.5, 45.0, 47.5, 50.0]
+          use_cv: true
+          cv_splits: 10
+      
+      # Version 2: Medium regularization
+      - name: mid_reg
+        params:
+          solver: huberized
+          alphas: [15.0, 20.0, 25.0]
+          use_cv: true
+          cv_splits: 10
+      
+      # Version 3: High regularization
+      - name: high_reg
+        params:
+          solver: huberized
+          alphas: [30.0, 35.0, 40.0]
+          use_cv: true
+          cv_splits: 10
+      
+      # Version 4: Different solver
+      - name: interior_point
+        params:
+          solver: interior-point
+          alphas: [10.0, 20.0, 30.0]
+          use_cv: true
+          cv_splits: 5
+      
+      # Version 5: No cross-validation, single alpha
+      - name: fixed_alpha
+        params:
+          solver: huberized
+          alpha: 15.0  # Note: single alpha instead of list
+          use_cv: false
+          fit_intercept: true
+      
+      # Version 6: Wide range for cross-validation
+      - name: wide_search
+        params:
+          solver: huberized
+          alphas: [1.0, 5.0, 10.0, 20.0, 40.0, 80.0]
+          use_cv: true
+          cv_splits: 8
+
+  # NN versions (unchanged)
+  - type: nn
+    enabled: false
+    per_country: false
+    versions:
+      - name: v1
+        params:
+          units_per_layer: [32, 32, 32, 32, 32]
+          activation: relu
+          optimizer: adam
+          learning_rate: 5.0e-5
+          epochs: 1500
+          batch_size: 32
+          patience: 50
+          parallel_models: 10
+          device: cpu
+          l2_penalty: 1.0e-4
+          validation_size: 0.3

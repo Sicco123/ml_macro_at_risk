@@ -279,7 +279,7 @@ def generate_windows(
 # ----------------------------- Task Management with File Locking -----------------------------
 
 PROGRESS_COLUMNS = [
-    "MODEL", "NN_VERSION", "QUANTILE", "HORIZON", "COUNTRY",
+    "MODEL", "VERSION", "QUANTILE", "HORIZON", "COUNTRY",
     "WINDOW_START", "WINDOW_END", "STATUS", "LAST_UPDATE",
     "ERROR_MSG", "MODEL_PATH", "FORECAST_ROWS", "IS_GLOBAL", 
     "INSTANCE_ID", "CLAIMED_AT"
@@ -288,7 +288,7 @@ PROGRESS_COLUMNS = [
 @dataclass(frozen=True)
 class TaskKey:
     model: str
-    nn_version: Optional[str]
+    version: Optional[str]
     quantile: float
     horizon: int
     country: str
@@ -297,7 +297,7 @@ class TaskKey:
     is_global: bool = False
 
     def id(self) -> str:
-        nv = self.nn_version or "-"
+        nv = self.version or "-"
         global_suffix = "-global" if self.is_global else ""
         return f"{self.model}{global_suffix}|{nv}|q={self.quantile}|h={self.horizon}|{self.country}|{self.window_start}_{self.window_end}"
 
@@ -342,7 +342,7 @@ def filter_completed_tasks(all_tasks: List[TaskKey], progress_path: Path) -> Lis
             for _, row in completed_df.iterrows():
                 task_id = (
                     row["MODEL"],
-                    row["NN_VERSION"] or "",
+                    row["VERSION"] or "",
                     row["QUANTILE"],
                     row["HORIZON"],
                     row["COUNTRY"],
@@ -357,7 +357,7 @@ def filter_completed_tasks(all_tasks: List[TaskKey], progress_path: Path) -> Lis
         for task in all_tasks:
             task_id = (
                 task.model,
-                task.nn_version or "",
+                task.version or "",
                 task.quantile,
                 task.horizon,
                 task.country,
@@ -445,7 +445,7 @@ def claim_task_batch(
             if not completed_df.empty:
                 for _, row in completed_df.iterrows():
                     task_id = (
-                        row["MODEL"], row["NN_VERSION"] or "", row["QUANTILE"], 
+                        row["MODEL"], row["VERSION"] or "", row["QUANTILE"], 
                         row["HORIZON"], row["COUNTRY"], row["WINDOW_START"], 
                         row["WINDOW_END"], row.get("IS_GLOBAL", False)
                     )
@@ -460,7 +460,7 @@ def claim_task_batch(
             if not failed_df.empty:
                 for _, row in failed_df.iterrows():
                     task_id = (
-                        row["MODEL"], row["NN_VERSION"] or "", row["QUANTILE"], 
+                        row["MODEL"], row["VERSION"] or "", row["QUANTILE"], 
                         row["HORIZON"], row["COUNTRY"], row["WINDOW_START"], 
                         row["WINDOW_END"], row.get("IS_GLOBAL", False)
                     )
@@ -485,7 +485,7 @@ def claim_task_batch(
                         valid_claimed = claimed_df[valid_mask]
                         for _, row in valid_claimed.iterrows():
                             task_id = (
-                                row["MODEL"], row["NN_VERSION"] or "", row["QUANTILE"],
+                                row["MODEL"], row["VERSION"] or "", row["QUANTILE"],
                                 row["HORIZON"], row["COUNTRY"], row["WINDOW_START"],
                                 row["WINDOW_END"], row.get("IS_GLOBAL", False)
                             )
@@ -515,7 +515,7 @@ def claim_task_batch(
             break
         
         task_id = (
-            task.model, task.nn_version or "", task.quantile,
+            task.model, task.version or "", task.quantile,
             task.horizon, task.country, task.window_start,
             task.window_end, task.is_global
         )
@@ -523,7 +523,7 @@ def claim_task_batch(
         if task_id not in active_task_ids:
             row = {
                 "MODEL": task.model,
-                "NN_VERSION": task.nn_version,
+                "VERSION": task.version,
                 "QUANTILE": task.quantile,
                 "HORIZON": task.horizon,
                 "COUNTRY": task.country,
@@ -573,7 +573,7 @@ def update_task_batch_status(
     for task, status, error_msg, model_path, forecast_rows in task_updates:
         row = {
             "MODEL": task.model,
-            "NN_VERSION": task.nn_version,
+            "VERSION": task.version,
             "QUANTILE": task.quantile,
             "HORIZON": task.horizon,
             "COUNTRY": task.country,
@@ -685,7 +685,7 @@ def append_forecasts(out_path: Path, rows: pd.DataFrame) -> None:
                         existing = pq.ParquetFile(out_path).read().to_pandas()
                         combined = pd.concat([existing, rows], ignore_index=True)
                         combined = combined.drop_duplicates(
-                            subset=["TIME", "COUNTRY", "HORIZON", "QUANTILE", "MODEL", "NN_VERSION"], 
+                            subset=["TIME", "COUNTRY", "HORIZON", "QUANTILE", "MODEL", "VERSION"], 
                             keep="last"
                         )
                         combined.sort_values(["TIME", "COUNTRY", "HORIZON", "QUANTILE"], inplace=True)
@@ -926,7 +926,7 @@ def _predict_nn_single(
 
     raise RuntimeError("Could not infer prediction array shape from EnsembleNNAPI.predict_per_country output.")
 
-# ----------------------------- Config Helpers (same as original) -----------------------------
+# ----------------------------- Config Helpers (adapted for all model types) -----------------------------
 
 def cfg_for_lqr(cfg: Dict[str, Any]) -> Dict[str, Any]:
     for m in cfg.get("models", []):
@@ -940,19 +940,33 @@ def cfg_for_arqr(cfg: Dict[str, Any]) -> Dict[str, Any]:
             return m.get("params", {})
     return {}
 
-def cfg_for_nn_versions(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+def cfg_for_model_versions(cfg: Dict[str, Any], model_type: str) -> List[Tuple[str, Dict[str, Any]]]:
+    """Get versions for any model type (lqr, ar-qr, nn)"""
     for m in cfg.get("models", []):
-        if m.get("type") == "nn" and m.get("enabled", False):
+        if m.get("type") == model_type and m.get("enabled", False):
             versions = m.get("versions", [])
-            return [(v.get("name"), v.get("params", {})) for v in versions]
+            if versions:
+                return [(v.get("name"), v.get("params", {})) for v in versions]
+            else:
+                # If no versions specified, return default version
+                return [("default", m.get("params", {}))]
     return []
 
-def cfg_for_nn_version(cfg: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
-    versions = cfg_for_nn_versions(cfg)
-    for n, p in versions:
-        if n == name:
-            return p
+def cfg_for_model_version(cfg: Dict[str, Any], model_type: str, version_name: Optional[str]) -> Dict[str, Any]:
+    """Get parameters for a specific version of a model type"""
+    versions = cfg_for_model_versions(cfg, model_type)
+    for name, params in versions:
+        if name == version_name:
+            return params
     return versions[0][1] if versions else {}
+
+def cfg_for_nn_versions(cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """Legacy function - use cfg_for_model_versions('nn') instead"""
+    return cfg_for_model_versions(cfg, "nn")
+
+def cfg_for_nn_version(cfg: Dict[str, Any], name: Optional[str]) -> Dict[str, Any]:
+    """Legacy function - use cfg_for_model_version('nn', name) instead"""
+    return cfg_for_model_version(cfg, "nn", name)
 
 def cfg_for_nn_per_country(cfg: Dict[str, Any]) -> bool:
     """Check if NN models should be trained per country (True) or globally (False)"""
@@ -986,7 +1000,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
         
         # Per-country model logic (existing logic)
         # Model artifact path
-        model_dir = paths["models_root"] / task.model / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"country={task.country}" / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+        model_dir = paths["models_root"] / task.model / (f"version={task.version}" if task.version else "default") / f"country={task.country}" / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
         model_dir.mkdir(parents=True, exist_ok=True)
         model_path = model_dir / "model.pkl"
         
@@ -1012,11 +1026,13 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             
             # Build model based on type
             if task.model == "lqr":
-                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_lqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=False)
+                lqr_params = cfg_for_model_version(cfg, "lqr", task.version)
+                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False)
             elif task.model == "ar-qr":
-                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, cfg_for_arqr(cfg), seed=int(cfg.get("seed", 42)), ar_only=True)
+                arqr_params = cfg_for_model_version(cfg, "ar-qr", task.version)
+                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, arqr_params, seed=int(cfg.get("seed", 42)), ar_only=True)
             elif task.model == "nn":
-                nn_params = cfg_for_nn_version(cfg, task.nn_version)
+                nn_params = cfg_for_model_version(cfg, "nn", task.version)
                 model_obj = _build_nn(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)))
             else:
                 raise ValueError(f"Unknown model type: {task.model}")
@@ -1064,7 +1080,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             "HORIZON": [task.horizon],
             "QUANTILE": [task.quantile],
             "MODEL": [task.model],
-            "NN_VERSION": [task.nn_version or ""],
+            "VERSION": [task.version or ""],
             "WINDOW_START": [task.window_start],
             "WINDOW_END": [task.window_end],
         })
@@ -1095,7 +1111,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
         we = pd.Timestamp(task.window_end)
         
         # Global model artifact path
-        model_dir = paths["models_root"] / f"{task.model}-global" / (f"nn_version={task.nn_version}" if task.nn_version else "default") / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
+        model_dir = paths["models_root"] / f"{task.model}-global" / (f"version={task.version}" if task.version else "default") / f"q={task.quantile}" / f"h={task.horizon}" / f"window_{task.window_start}_{task.window_end}"
         model_dir.mkdir(parents=True, exist_ok=True)
         model_path = model_dir / "model.pkl"
         
@@ -1138,7 +1154,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
                 raise RuntimeError("No countries with sufficient data for global NN training.")
             
             logging.info(f"[GLOBAL NN] Training model on {len(all_train_data)} countries -> {model_path}")
-            nn_params = cfg_for_nn_version(cfg, task.nn_version)
+            nn_params = cfg_for_model_version(cfg, "nn", task.version)
             model_obj = _build_nn_global(
                 all_train_data, target, task.quantile, task.horizon, lags,
                 nn_params, seed=int(cfg.get("seed", 42)), country_names=country_names
@@ -1185,7 +1201,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
                     "HORIZON": task.horizon,
                     "QUANTILE": task.quantile,
                     "MODEL": "nn-global",
-                    "NN_VERSION": task.nn_version or "",
+                    "VERSION": task.version or "",
                     "WINDOW_START": task.window_start,
                     "WINDOW_END": task.window_end,
                 })
@@ -1270,17 +1286,23 @@ def plan_all_tasks(cfg: Dict[str, Any], paths: Dict[str, Path]) -> List[TaskKey]
     size = int(rw["size"])
     step = int(rw.get("step", 1))
     
-    # Enabled models
-    enabled_models: List[Tuple[str, Optional[str], bool]] = []  # (model_type, nn_version, is_global)
+    # Enabled models with versions
+    enabled_models: List[Tuple[str, Optional[str], bool]] = []  # (model_type, version, is_global)
     for m in cfg.get("models", []):
         if not m.get("enabled", False):
             continue
-        if m.get("type") == "nn":
+        
+        model_type = m.get("type")
+        versions = cfg_for_model_versions(cfg, model_type)
+        
+        if model_type == "nn":
             is_global = not bool(m.get("per_country", True))  # Default to per-country unless explicitly set to global
-            for vname, _ in cfg_for_nn_versions(cfg):
+            for vname, _ in versions:
                 enabled_models.append(("nn", vname, is_global))
         else:
-            enabled_models.append((m.get("type"), None, False))
+            # For lqr and ar-qr models, add each version (they are always per-country, not global)
+            for vname, _ in versions:
+                enabled_models.append((model_type, vname, False))
     
     # Generate windows using first country from cached data as reference
     ref_country = next(iter(cached_countries.keys()))
@@ -1296,12 +1318,12 @@ def plan_all_tasks(cfg: Dict[str, Any], paths: Dict[str, Path]) -> List[TaskKey]
         windows = generate_windows(dates, size=size, step=step, start_date=start_date, end_date=end_date, horizon=h)
         for (wstart, wend, _ftime) in windows:
             for q in quantiles:
-                for (model_type, nn_ver, is_global) in enabled_models:
+                for (model_type, version, is_global) in enabled_models:
                     if is_global and model_type == "nn":
                         # ONE global task per (window, q, h, version)
                         all_tasks.append(TaskKey(
                             model="nn",
-                            nn_version=nn_ver,
+                            version=version,
                             quantile=q,
                             horizon=h,
                             country="__ALL__",          # sentinel for global model
@@ -1314,7 +1336,7 @@ def plan_all_tasks(cfg: Dict[str, Any], paths: Dict[str, Path]) -> List[TaskKey]
                         for country in cached_countries.keys():
                             all_tasks.append(TaskKey(
                                 model=model_type,
-                                nn_version=nn_ver,
+                                version=version,
                                 quantile=q,
                                 horizon=h,
                                 country=country,

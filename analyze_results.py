@@ -84,10 +84,17 @@ class QuantileAnalyzer:
             raise ValueError("No forecast data found!")
         
         self.data = pd.concat(all_data, ignore_index=True)
-        self.data = self.data.sort_values(['TIME', 'COUNTRY', 'HORIZON', 'QUANTILE', 'MODEL'])
+        
+        # Create a combined model identifier that includes version information
+        if 'VERSION' in self.data.columns:
+            self.data['MODEL_FULL'] = self.data['MODEL'].astype(str) + '_' + self.data['VERSION'].fillna('default').astype(str)
+        else:
+            self.data['MODEL_FULL'] = self.data['MODEL'].astype(str)
+        
+        self.data = self.data.sort_values(['TIME', 'COUNTRY', 'HORIZON', 'QUANTILE', 'MODEL_FULL'])
         
         print(f"Loaded {len(self.data)} forecasts")
-        print(f"Models: {sorted(self.data['MODEL'].unique())}")
+        print(f"Models: {sorted(self.data['MODEL_FULL'].unique())}")
         print(f"Countries: {sorted(self.data['COUNTRY'].unique())}")
         print(f"Quantiles: {sorted(self.data['QUANTILE'].unique())}")
         print(f"Horizons: {sorted(self.data['HORIZON'].unique())}")
@@ -110,7 +117,7 @@ class QuantileAnalyzer:
         
         results = []
         
-        for (model, country, quantile, horizon), group in data.groupby(['MODEL', 'COUNTRY', 'QUANTILE', 'HORIZON']):
+        for (model, country, quantile, horizon), group in data.groupby(['MODEL_FULL', 'COUNTRY', 'QUANTILE', 'HORIZON']):
             if len(group) > 0:
                 pb_loss = self.pinball_loss(
                     group['TRUE_DATA'].values,
@@ -217,7 +224,7 @@ class QuantileAnalyzer:
         print("Creating forecast plots...")
         
         countries = sorted(self.data['COUNTRY'].unique())
-        models = sorted(self.data['MODEL'].unique())
+        models = sorted(self.data['MODEL_FULL'].unique())
         quantiles = sorted(self.data['QUANTILE'].unique())
         horizons = sorted(self.data['HORIZON'].unique())
         
@@ -270,7 +277,7 @@ class QuantileAnalyzer:
         
         for i, model in enumerate(models):
             ax = axes[i]
-            model_data = data[data['MODEL'] == model].copy()
+            model_data = data[data['MODEL_FULL'] == model].copy()
             
             if len(model_data) == 0:
                 ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, 
@@ -370,14 +377,21 @@ class QuantileAnalyzer:
         benchmark = self.config['analysis']['benchmark_model']
         
         # Check if we have multiple models
-        models = self.data['MODEL'].unique()
+        models = self.data['MODEL_FULL'].unique()
         if len(models) < 2:
             print(f"Skipping DM tests: Only {len(models)} model(s) found, need at least 2")
             return pd.DataFrame()
         
-        if benchmark not in models:
+        # Find benchmark model (may include version)
+        benchmark_candidates = [m for m in models if m.startswith(benchmark)]
+        if len(benchmark_candidates) == 0:
             print(f"Warning: Benchmark model '{benchmark}' not found in data. Using first model as benchmark.")
-            benchmark = models[0]
+            benchmark_model = models[0]
+        elif len(benchmark_candidates) == 1:
+            benchmark_model = benchmark_candidates[0]
+        else:
+            print(f"Warning: Multiple benchmark variants found: {benchmark_candidates}. Using first one.")
+            benchmark_model = benchmark_candidates[0]
         
         results = []
         
@@ -391,19 +405,19 @@ class QuantileAnalyzer:
             for (country, quantile, horizon), group in data.groupby(['COUNTRY', 'QUANTILE', 'HORIZON']):
                 
                 # Get benchmark errors
-                benchmark_data = group[group['MODEL'] == benchmark]
+                benchmark_data = group[group['MODEL_FULL'] == benchmark_model]
                 if len(benchmark_data) == 0:
                     continue
                 
                 benchmark_errors = benchmark_data['TRUE_DATA'].values - benchmark_data['FORECAST'].values
                 
                 # Compare all other models to benchmark
-                models = group['MODEL'].unique()
+                models = group['MODEL_FULL'].unique()
                 for model in models:
-                    if model == benchmark:
+                    if model == benchmark_model:
                         continue
                     
-                    model_data = group[group['MODEL'] == model]
+                    model_data = group[group['MODEL_FULL'] == model]
                     if len(model_data) == 0:
                         continue
                     
@@ -426,7 +440,7 @@ class QuantileAnalyzer:
                         'QUANTILE': quantile,
                         'HORIZON': horizon,
                         'MODEL': model,
-                        'BENCHMARK': benchmark,
+                        'BENCHMARK': benchmark_model,
                         'DM_STAT': dm_stat,
                         'P_VALUE': p_value,
                         'SIGNIFICANT_5PCT': p_value < 0.05 if pd.notna(p_value) else False,
@@ -555,7 +569,7 @@ class QuantileAnalyzer:
         print("Running Model Confidence Set analysis...")
         
         # Check if we have multiple models
-        models = self.data['MODEL'].unique()
+        models = self.data['MODEL_FULL'].unique()
         if len(models) < 2:
             print(f"Skipping MCS analysis: Only {len(models)} model(s) found, need at least 2")
             return pd.DataFrame()
@@ -599,7 +613,7 @@ class QuantileAnalyzer:
                     time_losses = []
                     
                     for model in models:
-                        model_data = time_data[time_data['MODEL'] == model]
+                        model_data = time_data[time_data['MODEL_FULL'] == model]
                         if len(model_data) > 0:
                             true_val = model_data['TRUE_DATA'].iloc[0]
                             forecast = model_data['FORECAST'].iloc[0]
@@ -695,7 +709,7 @@ class QuantileAnalyzer:
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ## Data Overview
-- Models: {sorted(self.data['MODEL'].unique())}
+- Models: {sorted(self.data['MODEL_FULL'].unique())}
 - Countries: {len(self.data['COUNTRY'].unique())} countries
 - Quantiles: {sorted(self.data['QUANTILE'].unique())}
 - Horizons: {sorted(self.data['HORIZON'].unique())}
