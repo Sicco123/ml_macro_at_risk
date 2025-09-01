@@ -156,7 +156,8 @@ def lock_path(p: Path) -> Path:
 
 def load_country_files(data_dir: Path) -> Dict[str, Path]:
     files: List[Path] = []
-    for ext in ("*.parquet", "*.pq", "*.feather", "*.csv"):
+    # Prioritize fastest formats first: pickle (fastest), npy, feather, hdf5, parquet, csv (slowest)
+    for ext in ("*.pkl", "*.pickle", "*.npy", "*.feather", "*.ftr", "*.h5", "*.hdf5", "*.parquet", "*.pq", "*.csv"):
         files.extend(data_dir.glob(ext))
     if not files:
         raise FileNotFoundError(f"No data files found under {data_dir}")
@@ -164,11 +165,39 @@ def load_country_files(data_dir: Path) -> Dict[str, Path]:
     for f in files:
         stem = f.stem
         country = stem.split("__")[0].upper()
-        mapping[country] = f
+        # Prefer faster formats if multiple exist for the same country
+        if country not in mapping or f.suffix.lower() in [".pkl", ".pickle", ".npy", ".feather", ".ftr", ".h5", ".hdf5"]:
+            mapping[country] = f
     return mapping
 
 def read_df(path: Path) -> pd.DataFrame:
-    if path.suffix.lower() in [".parquet", ".pq", ".feather"]:
+    if path.suffix.lower() in [".pkl", ".pickle"]:
+        # Pickle is fastest Python-specific format
+        return pd.read_pickle(path)
+    elif path.suffix.lower() in [".h5", ".hdf5"]:
+        # HDF5 with good compression and query capabilities
+        return pd.read_hdf(path, key='data')
+    elif path.suffix.lower() in [".npy"]:
+        # Memory-mapped numpy arrays - extremely fast for pure numeric data
+        data = np.load(path, mmap_mode='r')  # Memory-mapped for speed
+        # Assume first row is TIME column, rest are features
+        # You'll need to save column names separately in a .txt file
+        col_names_path = path.with_suffix('.columns.txt')
+        if col_names_path.exists():
+            with open(col_names_path, 'r') as f:
+                columns = [line.strip() for line in f.readlines()]
+        else:
+            columns = [f'col_{i}' for i in range(data.shape[1])]
+        
+        df = pd.DataFrame(data, columns=columns)
+        return df
+    elif path.suffix.lower() in [".feather", ".ftr"]:
+        # Feather is fastest for wide datasets
+        df = pd.read_feather(path)
+        if df.index.name is not None:  # Has a named index
+            df.reset_index(inplace=True)
+        return df
+    elif path.suffix.lower() in [".parquet", ".pq"]:
         df = pd.read_parquet(path)
         df.reset_index(inplace=True)
         return df

@@ -218,3 +218,5 @@ analysis_output/
 *.pkl 
 *.lock
 .DS_Store
+*.npy
+*.columns.txt
