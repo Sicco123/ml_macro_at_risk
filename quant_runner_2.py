@@ -1076,13 +1076,13 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             try:
                 if task.model == "lqr":
                     lqr_params = cfg_for_model_version(cfg, "lqr", task.version)
-                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False, model_path=model_path)
+                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False, model_path=str(model_path)[:-9])
                 elif task.model == "ar-qr":
                     arqr_params = cfg_for_model_version(cfg, "ar-qr", task.version)
-                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, arqr_params, seed=int(cfg.get("seed", 42)), ar_only=True, model_path=model_path)
+                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, arqr_params, seed=int(cfg.get("seed", 42)), ar_only=True, model_path=str(model_path)[:-9])
                 elif task.model == "nn":
                     nn_params = cfg_for_model_version(cfg, "nn", task.version)
-                    model_obj = _load_nn_global(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), model_path=model_path)
+                    model_obj = _load_nn_global(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), model_path=str(model_path)[:-9])
                 else:
                     raise ValueError(f"Unknown model type: {task.model}")
                 #logging.info(f"Loaded model from {model_path}")
@@ -1116,7 +1116,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             # Save model
             if cfg["runtime"].get("save_models", True):
                 try:
-                    model_obj.store_model(model_path)
+                    model_obj.store_model(str(model_path)[:-9])
                     #logging.info(f"Saved model to {model_path}")
                 except Exception as e:
                     logging.warning(f"Could not save model: {e}")
@@ -1162,7 +1162,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
         })
         
         # Return success, task update, and forecast data for batch processing
-        task_update = (task, "done", None, model_path, 1)
+        task_update = (task, "done", None, str(model_path), 1)
         #logging.info(f"Completed task: {task.id()}")
         return True, task_update, out_df
         

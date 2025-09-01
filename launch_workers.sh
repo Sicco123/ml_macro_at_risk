@@ -42,19 +42,23 @@ COPY_CMD="cp -r outputs/ $HOME/ml_macro_at_risk/"
 AVAILABLE_CORES=$(taskset -cp $$ | cut -d: -f2 | tr -d ' ')
 echo "Available CPU cores for this process: $AVAILABLE_CORES"
 
-# Convert range to array (e.g., "112-127" becomes array of cores)
-if [[ $AVAILABLE_CORES == *"-"* ]]; then
-    # Handle range format like "112-127"
-    START_CORE=$(echo $AVAILABLE_CORES | cut -d- -f1)
-    END_CORE=$(echo $AVAILABLE_CORES | cut -d- -f2)
-    CORES_ARRAY=()
-    for ((core=$START_CORE; core<=$END_CORE; core++)); do
-        CORES_ARRAY+=($core)
-    done
-else
-    # Handle comma-separated format like "1,2,3"
-    IFS=',' read -ra CORES_ARRAY <<< "$AVAILABLE_CORES"
-fi
+# Convert ranges to array (e.g., "32-47,64-95,112-127" becomes array of all cores)
+CORES_ARRAY=()
+IFS=',' read -ra CORE_PARTS <<< "$AVAILABLE_CORES"
+
+for part in "${CORE_PARTS[@]}"; do
+    if [[ $part == *"-"* ]]; then
+        # Handle range format like "32-47"
+        START_CORE=$(echo $part | cut -d- -f1)
+        END_CORE=$(echo $part | cut -d- -f2)
+        for ((core=$START_CORE; core<=$END_CORE; core++)); do
+            CORES_ARRAY+=($core)
+        done
+    else
+        # Handle individual core number
+        CORES_ARRAY+=($part)
+    fi
+done
 
 NUM_AVAILABLE_CORES=${#CORES_ARRAY[@]}
 echo "Number of available cores: $NUM_AVAILABLE_CORES"
@@ -69,7 +73,7 @@ for i in $(seq 0 $((NUM_WORKERS-1))); do
     taskset -c $CORE_ID python quant_runner_2.py --config "$CONFIG_FILE" --worker-index $i &
     
     # Small delay to avoid overwhelming the system at startup
-    sleep 15
+    sleep 3
 done
 
 echo "All $NUM_WORKERS workers started in background"

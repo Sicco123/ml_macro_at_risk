@@ -343,7 +343,7 @@ class LQR:
 
     def store_model(self, store_dir):
         # mkdir if needed
-        os.makedirs(store_dir+ "model.pkl", exist_ok=True)
+        os.makedirs(store_dir, exist_ok=True)
 
         # pickle dataframe
         df = self.model.get_coefficients()
