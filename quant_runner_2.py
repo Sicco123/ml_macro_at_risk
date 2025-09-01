@@ -786,6 +786,38 @@ def _build_lqr(
     mdl.fit()
     return mdl
 
+def _load_lqr( train_df: pd.DataFrame,
+    target: str,
+    quantile: float,
+    horizon: int,
+    lags: List[int],
+    params: Dict[str, Any],
+    seed: int,
+    ar_only: bool, 
+    model_path
+    ) -> LQRModel:
+    
+    if ar_only:
+        data_list = [train_df[[c for c in train_df.columns if c in ["TIME", target]]].copy()]
+    else:
+        data_list = [train_df.copy()]
+
+    mdl = LQRModel(
+        data_list=data_list,
+        target=target,
+        quantiles=[quantile],
+        forecast_horizons=[horizon],
+        lags=lags,
+        alpha=float(params.get("alpha", 0.0)),
+        fit_intercept=bool(params.get("fit_intercept", True)),
+        solver=params.get("solver", "huberized"),
+        seed=seed
+    )
+
+    mdl.load_model(model_path)
+
+    return mdl
+
 def _build_nn(
     train_df: pd.DataFrame,
     target: str,
@@ -874,6 +906,40 @@ def _build_nn_global(
         return_train_loss=False,
         shuffle=True
     )
+    return mdl
+
+def _load_nn_global(
+    train_data_list: List[pd.DataFrame],
+    target: str,
+    quantile: float,
+    horizon: int,
+    lags: List[int],
+    nn_params: Dict[str, Any],
+    seed: int,
+    country_names: List[str], 
+    model_path
+    ):
+    # Load the model from disk
+    mdl = EnsembleNNAPI(
+        data_list=train_data_list,
+        target=target,
+        quantiles=[quantile],
+        forecast_horizons=[horizon],
+        units_per_layer=list(nn_params.get("units_per_layer", [32, 32])),
+        lags=lags,
+        activation=nn_params.get("activation", "relu"),
+        device=nn_params.get("device", "cpu"),
+        seed=seed,
+        transform=True,
+        prefit_AR=bool(nn_params.get("prefit_AR", True)),  # Enable for global models
+        country_ids=country_names,  # Pass country names for global model
+        time_col="TIME",
+        verbose=0
+    )
+
+    mdl.load_model(model_path)
+
+    
     return mdl
 
 def _predict_lqr_single(
@@ -1008,7 +1074,17 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
         model_obj = None
         if cfg["runtime"].get("allow_reload", True) and model_path.exists():
             try:
-                model_obj = joblib.load(model_path)
+                if task.model == "lqr":
+                    lqr_params = cfg_for_model_version(cfg, "lqr", task.version)
+                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False, model_path=model_path)
+                elif task.model == "ar-qr":
+                    arqr_params = cfg_for_model_version(cfg, "ar-qr", task.version)
+                    model_obj = _load_lqr(train_df, target, task.quantile, task.horizon, lags, arqr_params, seed=int(cfg.get("seed", 42)), ar_only=True, model_path=model_path)
+                elif task.model == "nn":
+                    nn_params = cfg_for_model_version(cfg, "nn", task.version)
+                    model_obj = _load_nn_global(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), model_path=model_path)
+                else:
+                    raise ValueError(f"Unknown model type: {task.model}")
                 #logging.info(f"Loaded model from {model_path}")
             except Exception as e:
                 logging.warning(f"Failed to load model: {e}")
@@ -1027,7 +1103,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             # Build model based on type
             if task.model == "lqr":
                 lqr_params = cfg_for_model_version(cfg, "lqr", task.version)
-                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False)
+                model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, lqr_params, seed=int(cfg.get("seed", 42)), ar_only=False, )
             elif task.model == "ar-qr":
                 arqr_params = cfg_for_model_version(cfg, "ar-qr", task.version)
                 model_obj = _build_lqr(train_df, target, task.quantile, task.horizon, lags, arqr_params, seed=int(cfg.get("seed", 42)), ar_only=True)
@@ -1040,7 +1116,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
             # Save model
             if cfg["runtime"].get("save_models", True):
                 try:
-                    joblib.dump(model_obj, model_path)
+                    model_obj.store_model(model_path)
                     #logging.info(f"Saved model to {model_path}")
                 except Exception as e:
                     logging.warning(f"Could not save model: {e}")

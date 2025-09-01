@@ -1,5 +1,6 @@
 """High-level Linear Quantile Regression API."""
 
+import os
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Literal
@@ -319,6 +320,14 @@ class LQR:
         return summary
 
     def load_model(self, load_dir):
+        
+        self.model = MultiQuantileRegressor(
+            quantiles=self.quantiles,
+            horizons=self.forecast_horizons,
+            alpha=self.best_alpha,
+            fit_intercept=self.fit_intercept,
+            solver=self.solver
+        )
 
         # unpickle dataframe
         df = pd.read_pickle(load_dir + "model.pkl")
@@ -330,7 +339,12 @@ class LQR:
         with open(load_dir + "alpha.pkl", "rb") as f:
             self.model.alpha = pickle.load(f)
 
+        self.is_fitted = True
+
     def store_model(self, store_dir):
+        # mkdir if needed
+        os.makedirs(store_dir+ "model.pkl", exist_ok=True)
+
         # pickle dataframe
         df = self.model.get_coefficients()
         df.to_pickle(store_dir + "model.pkl")

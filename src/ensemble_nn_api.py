@@ -7,11 +7,15 @@ import logging
 import hashlib
 from datetime import datetime
 import statsmodels.api as sm
+import os
+import pickle
 
 from .ensembleNN.utils import get_device
 from .ensembleNN.dataset import CountryTimeSeriesDataset, create_data_loaders
 from .ensembleNN.model import EnsembleNN
 from .ensembleNN.training import EnsembleNNTrainer
+from .ensembleNN import utils as ensembleNN_utils
+
 
 from .utils import (
     create_lagged_features,
@@ -116,21 +120,35 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         targets = pred_target_data[country_id][target_cols].values
         pred_target_data_raw = pred_target_data[country_id].copy()
         # Apply stored transformations to prediction data
-        if hasattr(self, 'transformations'):
+        if hasattr(self, 'transformations') and self.transformations:
             for country, df in pred_target_data.items():
                 #df = self._remove_AR_part(df, country)
 
                 if country in self.transformations:
-                    # Apply normalization using stored lambda functions
-                    for col, transform_dict in self.transformations[country].items():   
+                    # Apply normalization using stored parameters
+                    for col, transform_params in self.transformations[country].items():   
                         if col in df.columns:
+                            # Recreate normalization function from stored parameters
+                            mean = transform_params['mean']
+                            std = transform_params['std']
+                            
                             if col == self.target:
-                                df[col+"_untransformed"] = df[col] 
-                                df[col] = transform_dict['normalize'](df[col])
-
-                            pred_target_data[country][col] = transform_dict['normalize'](df[col])
+                                # Store untransformed version for features
+                                pred_target_data[country][col+"_untransformed"] = df[col].copy()
+                                # Apply transformation
+                                pred_target_data[country][col] = (df[col] - mean) / std
+                            else:
+                                pred_target_data[country][col] = (df[col] - mean) / std
                 else:
                     logger.warning(f"No transformations found for country {country}. Using raw data.")
+                    # Even when no transformations, create the untransformed column that dataset expects
+                    if self.target in df.columns:
+                        pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
+        else:
+            # No transformations available - create untransformed columns for all countries
+            for country, df in pred_target_data.items():
+                if self.target in df.columns:
+                    pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
 
      
         pred_target_data = self._per_quantile_per_horizon_targets(pred_target_data)
@@ -172,8 +190,11 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         if self.seed is not None:
             set_seeds(self.seed)
 
+        self.parallel_models = parallel_models
         #self._prefit()
         intercepts, phis = self._get_AR_terms()
+        self.intercepts = intercepts
+        self.phis = phis
         self._pretransform()
         
         
@@ -326,10 +347,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                         col_std = 1.0
                         logger.warning(f"Column {col} has zero variance across all countries. Using std=1 for normalization.")
                     
-                    # Store global transformation as lambda functions
+                    # Store global transformation parameters (not lambda functions)
                     global_transformations[col] = {
-                        'normalize': lambda x, mean=col_mean, std=col_std: (x - mean) / std,
-                        'denormalize': lambda x, mean=col_mean, std=col_std: (x * std) + mean,
                         'mean': col_mean,
                         'std': col_std
                     }
@@ -346,12 +365,16 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     
                 for col in cols_to_normalize:
                     if col in df.columns and col in global_transformations:
+                        # Recreate normalization function from stored parameters
+                        mean = global_transformations[col]['mean']
+                        std = global_transformations[col]['std']
+                        
                         if col == self.target:
                              self.features_and_targets[country][col+"_untransformed"] = df[col]
-                             self.features_and_targets[country][col] = global_transformations[col]['normalize'](df[col])
+                             self.features_and_targets[country][col] = (df[col] - mean) / std
                              continue
 
-                        self.features_and_targets[country][col] = global_transformations[col]['normalize'](df[col])
+                        self.features_and_targets[country][col] = (df[col] - mean) / std
                 
                 if self.verbose >= 2:
                     normalized_cols = [col for col in cols_to_normalize if col in df.columns]
@@ -444,6 +467,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 y = df[col]
                 X = sm.add_constant(X)  # Add constant term for intercept
                 # linear quantile regression from X on y 
+                # set seed 
+                np.random.seed(42)
                 model = sm.QuantReg(y, X)
                 fitted_model = model.fit(q=q)
                 hor_models[col] = fitted_model
@@ -477,3 +502,69 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 predictions[:, qdx, hdx] += self.ar_models[country][q][model_name].predict(X)
 
         return predictions
+    
+    def load_model(self, load_dir):
+
+        with open(load_dir + "intercepts.pkl", "rb") as f:
+            intercepts = pickle.load(f)
+
+        with open(load_dir + "phis.pkl", "rb") as f:
+            phis = pickle.load(f)
+
+        with open(load_dir + "parallel_models.pkl", "rb") as f:
+            self.parallel_models = pickle.load(f)
+            
+        # load transformations if they exist
+        transformations_path = load_dir + "transformations.pkl"
+        if os.path.exists(transformations_path) and os.path.getsize(transformations_path) > 0:
+            try:
+                with open(transformations_path, "rb") as f:
+                    self.transformations = pickle.load(f)
+            except (EOFError, pickle.UnpicklingError) as e:
+                print(f"Warning: Could not load transformations from {transformations_path}: {e}")
+                self.transformations = {}
+        else:
+            self.transformations = {}
+
+        self.model = EnsembleNN(
+            input_dim=self.input_dim,
+            quantiles=self.quantiles,
+            forecast_horizons=self.forecast_horizons,
+            units_per_layer=self.units_per_layer,
+            n_models=self.parallel_models,
+            activation=self.activation, 
+            intercepts_init=intercepts,
+            phis_init=phis
+        )
+
+        # load params with torch
+        ensembleNN_utils.load_model(self.model, load_dir + "model.pth")
+        
+        # Initialize trainer for predictions
+        self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
+        
+        self.is_fitted = True
+
+
+    def store_model(self, store_dir):
+        # mkdir if needed also if nested dir needs to be created
+        os.makedirs(store_dir, exist_ok=True)
+
+        ensembleNN_utils.save_model(self.model, store_dir + "model.pth")
+
+        # store intercepts
+        with open(store_dir + "intercepts.pkl", "wb") as f:
+            pickle.dump(self.intercepts, f)
+
+        # store phis
+        with open(store_dir + "phis.pkl", "wb") as f:
+            pickle.dump(self.phis, f)
+
+        # store parallel models
+        with open(store_dir + "parallel_models.pkl", "wb") as f:
+            pickle.dump(self.parallel_models, f)
+            
+        # store transformations
+        if hasattr(self, 'transformations'):
+            with open(store_dir + "transformations.pkl", "wb") as f:
+                pickle.dump(self.transformations, f)

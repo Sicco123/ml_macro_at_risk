@@ -48,11 +48,7 @@ def count_parameters(model: torch.nn.Module) -> int:
 
 def save_model(
     model: torch.nn.Module,
-    optimizer: Optional[torch.optim.Optimizer],
-    epoch: int,
-    loss: float,
-    filepath: Path,
-    metadata: Optional[Dict[str, Any]] = None
+    filepath ,
 ) -> None:
     """Save model checkpoint.
     
@@ -65,23 +61,17 @@ def save_model(
         metadata: Additional metadata to save
     """
     checkpoint = {
-        'epoch': epoch,
         'model_state_dict': model.state_dict(),
-        'loss': loss,
-        'metadata': metadata or {}
     }
     
-    if optimizer is not None:
-        checkpoint['optimizer_state_dict'] = optimizer.state_dict()
-    
-    filepath.parent.mkdir(parents=True, exist_ok=True)
+   
     torch.save(checkpoint, filepath)
     #logger.info(f"Model saved to {filepath}")
 
 
 def load_model(
     model: torch.nn.Module,
-    filepath: Path,
+    filepath,
     optimizer: Optional[torch.optim.Optimizer] = None,
     device: Optional[torch.device] = None
 ) -> Dict[str, Any]:

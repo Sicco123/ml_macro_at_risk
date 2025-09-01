@@ -318,7 +318,7 @@ class MultiQuantileRegressor:
                     })
         
         return pd.DataFrame(records)
-    
+        
     def set_coefficients(self, df):
         for q in self.quantiles:
             for h in self.horizons:
