@@ -24,7 +24,7 @@ ensemble_nn:
   activation: relu
   optimizer: adam
   learning_rate: 5.0e-5
-  epochs: 1500
+  epochs: 1
   batch_size: 32
   patience: 50
   parallel_models: 10

@@ -318,6 +318,15 @@ class MultiQuantileRegressor:
                     })
         
         return pd.DataFrame(records)
+    
+    def set_coefficients(self, df):
+        for q in self.quantiles:
+            for h in self.horizons:
+                key = f"q{q:.3f}_h{h}"
+                if key in self.regressors:
+                    self.regressors[key].intercept_ = df.loc[(df['quantile'] == q) & (df['horizon'] == h), 'coef'].values[0]
+                    self.regressors[key].coef_ = df.loc[(df['quantile'] == q) & (df['horizon'] == h), 'coef'].values[1:]
+        return 
 
 
 def cross_validate_alpha(

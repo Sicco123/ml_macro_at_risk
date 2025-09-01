@@ -9,7 +9,7 @@ analysis:
   mcs_alpha: 0.1  # Significance level for Model Confidence Set
 
 plots:
-  separate_quantiles: true   # If true, create separate plots for each quantile
+  separate_quantiles: false   # If true, create separate plots for each quantile
   high_quality: false        # If true, use high DPI and PDF format
 
 covid:

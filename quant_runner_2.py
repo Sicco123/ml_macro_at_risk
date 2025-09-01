@@ -820,7 +820,7 @@ def _build_nn(
         patience=int(nn_params.get("patience", 20)),
         verbose=0,
         optimizer=nn_params.get("optimizer", "adam"),
-        parallel_models=1,  # Force single model in NN ensemble
+        parallel_models=nn_params.get("parallel_models", 1),
         l2=float(nn_params.get("l2_penalty", 0.0)),
         return_validation_loss=False,
         return_train_loss=False,
@@ -868,7 +868,7 @@ def _build_nn_global(
         patience=int(nn_params.get("patience", 20)),
         verbose=0,
         optimizer=nn_params.get("optimizer", "adam"),
-        parallel_models=1,  # Force single model in NN ensemble
+        parallel_models=nn_params.get("parallel_models", 1),  # Force single model in NN ensemble
         l2=float(nn_params.get("l2_penalty", 0.0)),
         return_validation_loss=False,
         return_train_loss=False,
@@ -1116,7 +1116,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
         model_path = model_dir / "model.pkl"
         
         # Check cache first
-        cache_key = f"{task.model}|{task.nn_version or '-'}|q={task.quantile}|h={task.horizon}|{task.window_start}_{task.window_end}"
+        cache_key = f"{task.model}|{task.version or '-'}|q={task.quantile}|h={task.horizon}|{task.window_start}_{task.window_end}"
         model_obj = None
         
         if cache_key in _global_model_cache:

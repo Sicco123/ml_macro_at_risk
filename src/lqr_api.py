@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Optional, Literal
 import logging
+import pickle
 
 from .lqr.model import MultiQuantileRegressor, cross_validate_alpha
 from .lqr.cv import country_validation_split, select_best_alpha
@@ -30,6 +31,7 @@ class LQR:
         fit_intercept: bool = True,
         solver: str = "huberized",
         seed: Optional[int] = 42,
+
     ) -> None:
         """Initialize Linear Quantile Regression.
         
@@ -223,6 +225,7 @@ class LQR:
             solver=self.solver
         )
         
+ 
       
         # Fit model
         #logger.info(f"Fitting LQR with alpha={self.best_alpha}")
@@ -314,6 +317,27 @@ class LQR:
             summary['cv_results'] = self.cv_results
         
         return summary
+
+    def load_model(self, load_dir):
+
+        # unpickle dataframe
+        df = pd.read_pickle(load_dir + "model.pkl")
+
+        # Set coefficients in model
+        self.model.set_coefficients(df)
+
+        # read alpha
+        with open(load_dir + "alpha.pkl", "rb") as f:
+            self.model.alpha = pickle.load(f)
+
+    def store_model(self, store_dir):
+        # pickle dataframe
+        df = self.model.get_coefficients()
+        df.to_pickle(store_dir + "model.pkl")
+
+        # store alpha
+        with open(store_dir + "alpha.pkl", "wb") as f:
+            pickle.dump(self.model.alpha, f)
 
 
 # Alias for compatibility

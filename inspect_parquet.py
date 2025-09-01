@@ -57,4 +57,3 @@ for (country, model), group in df.groupby(["COUNTRY", "MODEL"]):
 # df.to_parquet("/home/skooiker/ml_macro_at_risk/outputs/progress/progress.parquet")
 
 
-

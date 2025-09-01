@@ -139,6 +139,9 @@ class QuantileAnalyzer:
         """Create pinball loss tables for each quantile/horizon combination."""
         print("Creating pinball loss tables...")
         
+        # Get DM test results for significance stars
+        dm_results = self._get_dm_results_for_tables()
+        
         for exclude_covid in [False, True]:
             covid_suffix = "_excl_covid" if exclude_covid else "_incl_covid"
             
@@ -167,13 +170,18 @@ class QuantileAnalyzer:
                     # Round for display
                     table_display = table.round(4)
                     
+                    # Add significance stars
+                    table_with_stars = self._add_dm_stars_to_table(
+                        table_display, dm_results, quantile, horizon, exclude_covid
+                    )
+                    
                     # Save readable version
                     filename = f"pinball_q{quantile}_h{horizon}{covid_suffix}"
-                    table_display.to_csv(self.output_dir / 'tables' / f"{filename}.csv")
+                    table_with_stars.to_csv(self.output_dir / 'tables' / f"{filename}.csv")
                     
                     # Create LaTeX version
                     latex_table = self._create_latex_table(
-                        table_display, 
+                        table_with_stars, 
                         f"Pinball Loss: Quantile {quantile}, Horizon {horizon}{' (Excl. COVID)' if exclude_covid else ' (Incl. COVID)'}",
                         f"pinball-q{quantile}-h{horizon}{covid_suffix}"
                     )
@@ -183,12 +191,162 @@ class QuantileAnalyzer:
                     
                     print(f"Created table for q={quantile}, h={horizon}{covid_suffix}")
     
+    def _get_dm_results_for_tables(self) -> pd.DataFrame:
+        """Get Diebold-Mariano test results for adding stars to pinball tables."""
+        print("Running Diebold-Mariano tests for significance stars...")
+        
+        benchmark = self.config['analysis']['benchmark_model']
+        
+        # Check if we have multiple models
+        models = self.data['MODEL_FULL'].unique()
+        if len(models) < 2:
+            print(f"No DM tests possible: Only {len(models)} model(s) found")
+            return pd.DataFrame()
+        
+        # Find benchmark model (may include version)
+        benchmark_candidates = [m for m in models if m.startswith(benchmark)]
+        if len(benchmark_candidates) == 0:
+            print(f"Warning: Benchmark model '{benchmark}' not found in data. Using first model as benchmark.")
+            benchmark_model = models[0]
+        elif len(benchmark_candidates) == 1:
+            benchmark_model = benchmark_candidates[0]
+        else:
+            print(f"Warning: Multiple benchmark variants found: {benchmark_candidates}. Using first one.")
+            benchmark_model = benchmark_candidates[0]
+        
+        results = []
+        
+        for exclude_covid in [False, True]:
+            data = self.data.copy()
+            if exclude_covid:
+                data = data[~((data['TIME'] >= self.covid_start) & (data['TIME'] <= self.covid_end))]
+            
+            for (country, quantile, horizon), group in data.groupby(['COUNTRY', 'QUANTILE', 'HORIZON']):
+                
+                # Get benchmark errors
+                benchmark_data = group[group['MODEL_FULL'] == benchmark_model]
+                if len(benchmark_data) == 0:
+                    continue
+                
+                # Compare all other models to benchmark
+                models = group['MODEL_FULL'].unique()
+                for model in models:
+                    if model == benchmark_model:
+                        # Benchmark gets no stars (reference model)
+                        results.append({
+                            'COUNTRY': country,
+                            'QUANTILE': quantile,
+                            'HORIZON': horizon,
+                            'MODEL': model,
+                            'P_VALUE': 1.0,  # No test against itself
+                            'COVID_EXCLUDED': exclude_covid
+                        })
+                        continue
+                    
+                    model_data = group[group['MODEL_FULL'] == model]
+                    if len(model_data) == 0:
+                        continue
+                    
+                    # Align data by time
+                    common_times = pd.Index(benchmark_data['TIME']).intersection(pd.Index(model_data['TIME']))
+                    if len(common_times) < 10:  # Need sufficient observations
+                        continue
+                    
+                    bench_aligned = benchmark_data[benchmark_data['TIME'].isin(common_times)].sort_values('TIME')
+                    model_aligned = model_data[model_data['TIME'].isin(common_times)].sort_values('TIME')
+                    
+                    bench_errors = bench_aligned['TRUE_DATA'].values - bench_aligned['FORECAST'].values
+                    model_errors = model_aligned['TRUE_DATA'].values - model_aligned['FORECAST'].values
+                    
+                    # Run DM test
+                    dm_stat, p_value = self.diebold_mariano_test(model_errors, bench_errors, horizon)
+                    
+                    results.append({
+                        'COUNTRY': country,
+                        'QUANTILE': quantile,
+                        'HORIZON': horizon,
+                        'MODEL': model,
+                        'P_VALUE': p_value,
+                        'COVID_EXCLUDED': exclude_covid
+                    })
+        
+        return pd.DataFrame(results)
+    
+    def _add_dm_stars_to_table(self, table: pd.DataFrame, dm_results: pd.DataFrame, 
+                              quantile: float, horizon: int, exclude_covid: bool) -> pd.DataFrame:
+        """Add Diebold-Mariano significance stars to pinball loss table."""
+        
+        if len(dm_results) == 0:
+            return table
+        
+        # Filter DM results for this specific combination
+        dm_subset = dm_results[
+            (dm_results['QUANTILE'] == quantile) & 
+            (dm_results['HORIZON'] == horizon) &
+            (dm_results['COVID_EXCLUDED'] == exclude_covid)
+        ]
+        
+        if len(dm_subset) == 0:
+            return table
+        
+        # Create a copy to modify
+        table_with_stars = table.copy()
+        
+        # Function to get significance stars
+        def get_stars(p_value):
+            if pd.isna(p_value):
+                return ""
+            elif p_value < 0.01:
+                return "***"
+            elif p_value < 0.05:
+                return "**"
+            elif p_value < 0.10:
+                return "*"
+            else:
+                return ""
+        
+        # Add stars to each cell
+        for country in table_with_stars.index:
+            for model in table_with_stars.columns:
+                if country == 'AVERAGE':
+                    # For average row, use overall significance (can be computed as mean p-value or other logic)
+                    model_dm = dm_subset[dm_subset['MODEL'] == model]
+                    if len(model_dm) > 0:
+                        avg_p_value = model_dm['P_VALUE'].mean()
+                        stars = get_stars(avg_p_value)
+                    else:
+                        stars = ""
+                else:
+                    # For individual countries
+                    model_dm = dm_subset[
+                        (dm_subset['MODEL'] == model) & 
+                        (dm_subset['COUNTRY'] == country)
+                    ]
+                    if len(model_dm) > 0:
+                        p_value = model_dm['P_VALUE'].iloc[0]
+                        stars = get_stars(p_value)
+                    else:
+                        stars = ""
+                
+                # Add stars to the value
+                current_value = table_with_stars.loc[country, model]
+                if pd.notna(current_value):
+                    if isinstance(current_value, str):
+                        table_with_stars.loc[country, model] = f"{current_value}{stars}"
+                    else:
+                        table_with_stars.loc[country, model] = f"{current_value:.4f}{stars}"
+        
+        return table_with_stars
+    
     def _create_latex_table(self, df: pd.DataFrame, caption: str, label: str) -> str:
         """Create a LaTeX table from a DataFrame."""
         
         # Prepare column specification
         n_cols = len(df.columns)
         col_spec = 'l' + 'c' * n_cols  # left-aligned for index, centered for data
+        
+        # Check if this is a pinball loss table with stars (contains numeric values with asterisks)
+        has_stars = any('*' in str(val) for val in df.values.flatten() if pd.notna(val) and isinstance(val, str))
         
         latex = f"""\\begin{{table}}[htbp]
 \\centering
@@ -210,13 +368,30 @@ class QuantileAnalyzer:
             else:
                 latex += f"{idx} & "
             
-            values = [f"{val:.4f}" if pd.notna(val) else "---" for val in row]
+            # Handle both numeric and string values
+            values = []
+            for val in row:
+                if pd.isna(val):
+                    values.append("---")
+                elif isinstance(val, str):
+                    values.append(val)
+                else:
+                    values.append(f"{val:.4f}")
             latex += " & ".join(values) + " \\\\\n"
         
-        latex += """\\bottomrule
-\\end{tabular}
-\\end{table}
-"""
+        latex += "\\bottomrule\n"
+        latex += "\\end{tabular}\n"
+        
+        # Add note about significance stars if present
+        if has_stars:
+            latex += "\\begin{tablenotes}\n"
+            latex += "\\small\n"
+            latex += "\\item Notes: Significance levels from Diebold-Mariano tests against benchmark model: "
+            latex += "*** p<0.01, ** p<0.05, * p<0.10\n"
+            latex += "\\end{tablenotes}\n"
+        
+        latex += "\\end{table}\n"
+        
         return latex
     
     def plot_forecasts_by_country(self):
@@ -489,8 +664,9 @@ class QuantileAnalyzer:
                     pval_table = data.pivot(index='COUNTRY', columns='MODEL', values='P_VALUE')
                     pval_table = pval_table.round(3)
                     
-                    # Combine tables
-                    combined = pval_table.astype(str) + sig_table
+                    # Combine tables - format p-values as strings first
+                    pval_formatted = pval_table.applymap(lambda x: f"{x:.3f}" if pd.notna(x) else "---")
+                    combined = pval_formatted + sig_table
                     
                     # Save
                     filename = f"dm_test_q{quantile}_h{horizon}{covid_suffix}"
