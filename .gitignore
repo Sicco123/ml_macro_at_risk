@@ -220,3 +220,6 @@ analysis_output/
 .DS_Store
 *.npy
 *.columns.txt
+*.pth
+*.out
+*.db

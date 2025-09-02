@@ -215,10 +215,10 @@ def main():
     parser.add_argument("--format", choices=["feather", "numpy", "hdf5", "pickle", "all"], 
                        default="feather", help="Format to convert to")
     parser.add_argument("--input-dir", type=Path, 
-                       default="/Users/siccokooiker/surfdrive/ml_macro_at_risk/processed_per_country",
+                       default="processed_per_country",
                        help="Input directory with parquet files")
     parser.add_argument("--output-base", type=Path,
-                       default="/Users/siccokooiker/surfdrive/ml_macro_at_risk/processed_per_country",
+                       default="processed_per_country",
                        help="Base output directory")
     parser.add_argument("--benchmark", action="store_true",
                        help="Run loading benchmarks after conversion")

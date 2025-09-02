@@ -5,7 +5,7 @@ output:
   base_dir: "analysis_output"
 
 analysis:
-  benchmark_model: "ar-qr-per-country"  # Model to use as benchmark for DM tests
+  benchmark_model: "ar-qr_T192"  # Model to use as benchmark for DM tests
   mcs_alpha: 0.1  # Significance level for Model Confidence Set
 
 plots:

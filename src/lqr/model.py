@@ -42,7 +42,7 @@ def huberized_pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray,
     error = y - y_pred
     pinball = np.where(error >= 0, quantile * error, (quantile - 1) * error)
     
-    # L2 regularization (don't regularize intercept)
+    # L2 regularization (don't regularize intercept and first ar term)
     reg_term = alpha * np.sum(coef[1:]**2)
     
     return np.mean(pinball) + reg_term

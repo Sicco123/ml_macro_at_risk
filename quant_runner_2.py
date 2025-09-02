@@ -36,6 +36,8 @@ import psutil
 import random
 import logging
 import traceback
+import sqlite3
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -173,24 +175,11 @@ def load_country_files(data_dir: Path) -> Dict[str, Path]:
 def read_df(path: Path) -> pd.DataFrame:
     if path.suffix.lower() in [".pkl", ".pickle"]:
         # Pickle is fastest Python-specific format
-        return pd.read_pickle(path)
-    elif path.suffix.lower() in [".h5", ".hdf5"]:
-        # HDF5 with good compression and query capabilities
-        return pd.read_hdf(path, key='data')
-    elif path.suffix.lower() in [".npy"]:
-        # Memory-mapped numpy arrays - extremely fast for pure numeric data
-        data = np.load(path, mmap_mode='r')  # Memory-mapped for speed
-        # Assume first row is TIME column, rest are features
-        # You'll need to save column names separately in a .txt file
-        col_names_path = path.with_suffix('.columns.txt')
-        if col_names_path.exists():
-            with open(col_names_path, 'r') as f:
-                columns = [line.strip() for line in f.readlines()]
-        else:
-            columns = [f'col_{i}' for i in range(data.shape[1])]
-        
-        df = pd.DataFrame(data, columns=columns)
+        df = pd.read_pickle(path)
+        if df.index.name is not None:  # Has a named index
+            df.reset_index(inplace=True)
         return df
+   
     elif path.suffix.lower() in [".feather", ".ftr"]:
         # Feather is fastest for wide datasets
         df = pd.read_feather(path)
@@ -698,6 +687,350 @@ def update_task_status(
         instance_id
     )
 
+# ----------------------------- SQLite Task Coordinator (Much Faster) -----------------------------
+
+class SQLiteTaskCoordinator:
+    """
+    SQLite-based task coordination that's much faster than Parquet files.
+    Uses WAL mode for better concurrent access and in-memory caching.
+    """
+    
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._local_cache = {}
+        self._cache_lock = threading.Lock()
+        self._init_database()
+    
+    def _init_database(self):
+        """Initialize SQLite database with proper schema and settings"""
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
+            # Enable WAL mode for better concurrent access
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")  
+            conn.execute("PRAGMA cache_size=10000")
+            conn.execute("PRAGMA temp_store=MEMORY")
+            
+            # Create tables
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS completed_tasks (
+                    model TEXT NOT NULL,
+                    version TEXT,
+                    quantile REAL NOT NULL,
+                    horizon INTEGER NOT NULL,
+                    country TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    is_global INTEGER NOT NULL DEFAULT 0,
+                    completed_at TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    model_path TEXT,
+                    forecast_rows INTEGER DEFAULT 0,
+                    PRIMARY KEY (model, version, quantile, horizon, country, window_start, window_end, is_global)
+                );
+                
+                CREATE TABLE IF NOT EXISTS claimed_tasks (
+                    model TEXT NOT NULL,
+                    version TEXT,
+                    quantile REAL NOT NULL,
+                    horizon INTEGER NOT NULL,
+                    country TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    is_global INTEGER NOT NULL DEFAULT 0,
+                    claimed_at TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (model, version, quantile, horizon, country, window_start, window_end, is_global)
+                );
+                
+                CREATE TABLE IF NOT EXISTS failed_tasks (
+                    model TEXT NOT NULL,
+                    version TEXT,
+                    quantile REAL NOT NULL,
+                    horizon INTEGER NOT NULL,
+                    country TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    is_global INTEGER NOT NULL DEFAULT 0,
+                    failed_at TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    error_msg TEXT,
+                    PRIMARY KEY (model, version, quantile, horizon, country, window_start, window_end, is_global)
+                );
+                
+                -- Indexes for faster lookups
+                CREATE INDEX IF NOT EXISTS idx_completed_country ON completed_tasks(country);
+                CREATE INDEX IF NOT EXISTS idx_claimed_expires ON claimed_tasks(expires_at);
+                CREATE INDEX IF NOT EXISTS idx_failed_country ON failed_tasks(country);
+            """)
+            conn.commit()
+    
+    def _task_to_tuple(self, task: TaskKey) -> tuple:
+        """Convert TaskKey to database tuple"""
+        return (
+            task.model,
+            task.version or "",
+            task.quantile,
+            task.horizon,
+            task.country,
+            task.window_start,
+            task.window_end,
+            1 if task.is_global else 0
+        )
+    
+    def _cleanup_expired_claims(self, conn: sqlite3.Connection) -> int:
+        """Remove expired claims and return count of removed claims"""
+        current_time = datetime.now().isoformat()
+        cursor = conn.execute(
+            "DELETE FROM claimed_tasks WHERE expires_at < ?",
+            (current_time,)
+        )
+        return cursor.rowcount
+    
+    def get_completed_task_ids(self) -> set:
+        """Get set of completed task IDs for fast filtering"""
+        with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            cursor = conn.execute("""
+                SELECT model, version, quantile, horizon, country, window_start, window_end, is_global
+                FROM completed_tasks
+            """)
+            return set(cursor.fetchall())
+    
+    def claim_task_batch(self, tasks: List[TaskKey], instance_id: str, 
+                        batch_size: int = 5, timeout_minutes: int = 30) -> List[TaskKey]:
+        """
+        Atomically claim a batch of available tasks using SQLite transactions.
+        Much faster than Parquet file operations.
+        """
+        if not tasks:
+            return []
+        
+        claimed_tasks = []
+        current_time = datetime.now()
+        expire_time = current_time + pd.Timedelta(minutes=timeout_minutes)
+        current_iso = current_time.isoformat()
+        expire_iso = expire_time.isoformat()
+        
+        # Shuffle to reduce contention
+        shuffled_tasks = random.sample(tasks, min(len(tasks), batch_size * 3))
+        
+        with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                
+                # Clean up expired claims first
+                expired_count = self._cleanup_expired_claims(conn)
+                if expired_count > 0:
+                    logging.debug(f"Cleaned up {expired_count} expired claims")
+                
+                # Check which tasks are available (not completed, claimed, or failed)
+                for task in shuffled_tasks:
+                    if len(claimed_tasks) >= batch_size:
+                        break
+                    
+                    task_tuple = self._task_to_tuple(task)
+                    
+                    # Check if task is already completed
+                    cursor = conn.execute(
+                        "SELECT 1 FROM completed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=?",
+                        task_tuple
+                    )
+                    if cursor.fetchone():
+                        continue
+                    
+                    # Check if task is currently claimed (not expired)
+                    cursor = conn.execute(
+                        "SELECT 1 FROM claimed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=? AND expires_at > ?",
+                        task_tuple + (current_iso,)
+                    )
+                    if cursor.fetchone():
+                        continue
+                    
+                    # Check if task has failed (optional - you might want to retry failed tasks)
+                    cursor = conn.execute(
+                        "SELECT 1 FROM failed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=?",
+                        task_tuple
+                    )
+                    if cursor.fetchone():
+                        continue
+                    
+                    # Claim the task
+                    try:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO claimed_tasks (model, version, quantile, horizon, country, window_start, window_end, is_global, claimed_at, instance_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            task_tuple + (current_iso, instance_id, expire_iso)
+                        )
+                        claimed_tasks.append(task)
+                    except sqlite3.IntegrityError:
+                        # Task was claimed by another process
+                        continue
+                
+                conn.commit()
+                
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Failed to claim tasks: {e}")
+                return []
+        
+        if claimed_tasks:
+            logging.info(f"Claimed {len(claimed_tasks)} tasks")
+        
+        return claimed_tasks
+    
+    def update_task_status_batch(self, 
+                                task_updates: List[Tuple[TaskKey, str, Optional[str], Optional[Path], int]], 
+                                instance_id: str) -> None:
+        """
+        Update status for a batch of tasks. Much faster than Parquet operations.
+        """
+        if not task_updates:
+            return
+        
+        current_time = datetime.now().isoformat()
+        
+        with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                
+                for task, status, error_msg, model_path, forecast_rows in task_updates:
+                    task_tuple = self._task_to_tuple(task)
+                    
+                    if status == "done":
+                        # Move from claimed to completed
+                        conn.execute(
+                            "DELETE FROM claimed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=?",
+                            task_tuple
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO completed_tasks (model, version, quantile, horizon, country, window_start, window_end, is_global, completed_at, instance_id, model_path, forecast_rows) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            task_tuple + (current_time, instance_id, str(model_path) if model_path else None, forecast_rows)
+                        )
+                    
+                    elif status == "failed":
+                        # Move from claimed to failed
+                        conn.execute(
+                            "DELETE FROM claimed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=?",
+                            task_tuple
+                        )
+                        conn.execute(
+                            "INSERT OR REPLACE INTO failed_tasks (model, version, quantile, horizon, country, window_start, window_end, is_global, failed_at, instance_id, error_msg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            task_tuple + (current_time, instance_id, error_msg)
+                        )
+                
+                conn.commit()
+                
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Failed to update task status: {e}")
+    
+    def get_statistics(self) -> Dict[str, int]:
+        """Get task statistics"""
+        with sqlite3.connect(str(self.db_path), timeout=5.0) as conn:
+            stats = {}
+            
+            cursor = conn.execute("SELECT COUNT(*) FROM completed_tasks")
+            stats['completed'] = cursor.fetchone()[0]
+            
+            cursor = conn.execute("SELECT COUNT(*) FROM claimed_tasks WHERE expires_at > ?", (datetime.now().isoformat(),))
+            stats['claimed'] = cursor.fetchone()[0]
+            
+            cursor = conn.execute("SELECT COUNT(*) FROM failed_tasks")
+            stats['failed'] = cursor.fetchone()[0]
+            
+            return stats
+    
+    def cleanup_stale_claimed_tasks(self) -> int:
+        """
+        Clean up stale claimed tasks that were never completed or failed.
+        This handles cases where workers crashed or were stopped unexpectedly.
+        Returns the number of stale tasks cleaned up.
+        """
+        current_time = datetime.now().isoformat()
+        
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                
+                # Find all expired claimed tasks
+                cursor = conn.execute(
+                    "SELECT COUNT(*) FROM claimed_tasks WHERE expires_at < ?",
+                    (current_time,)
+                )
+                stale_count = cursor.fetchone()[0]
+                
+                if stale_count > 0:
+                    # Delete expired claimed tasks
+                    conn.execute(
+                        "DELETE FROM claimed_tasks WHERE expires_at < ?",
+                        (current_time,)
+                    )
+                    logging.info(f"Cleaned up {stale_count} stale claimed tasks")
+                
+                conn.commit()
+                return stale_count
+                
+            except Exception as e:
+                conn.rollback()
+                logging.error(f"Failed to cleanup stale claimed tasks: {e}")
+                return 0
+
+    def get_available_tasks(self, all_tasks: List[TaskKey]) -> List[TaskKey]:
+        """
+        Get all tasks that are available for claiming (not completed, not currently claimed, not failed).
+        This replaces the old filter_completed_tasks method and provides more comprehensive filtering.
+        """
+        if not all_tasks:
+            return []
+        
+        current_time = datetime.now().isoformat()
+        
+        with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+            # Get sets of task IDs that are not available
+            cursor = conn.execute("""
+                SELECT model, version, quantile, horizon, country, window_start, window_end, is_global
+                FROM completed_tasks
+            """)
+            completed_ids = set(cursor.fetchall())
+            
+            cursor = conn.execute("""
+                SELECT model, version, quantile, horizon, country, window_start, window_end, is_global
+                FROM claimed_tasks WHERE expires_at > ?
+            """, (current_time,))
+            claimed_ids = set(cursor.fetchall())
+            
+            cursor = conn.execute("""
+                SELECT model, version, quantile, horizon, country, window_start, window_end, is_global
+                FROM failed_tasks
+            """)
+            failed_ids = set(cursor.fetchall())
+        
+        # Filter out unavailable tasks
+        unavailable_ids = completed_ids | claimed_ids | failed_ids
+        available_tasks = []
+        
+        for task in all_tasks:
+            task_tuple = self._task_to_tuple(task)
+            if task_tuple not in unavailable_ids:
+                available_tasks.append(task)
+        
+        return available_tasks
+
+    def filter_completed_tasks(self, all_tasks: List[TaskKey]) -> List[TaskKey]:
+        """Filter out completed tasks using fast SQLite lookup (legacy method for backwards compatibility)"""
+        if not all_tasks:
+            return []
+        
+        completed_ids = self.get_completed_task_ids()
+        
+        remaining_tasks = []
+        for task in all_tasks:
+            task_tuple = self._task_to_tuple(task)
+            if task_tuple not in completed_ids:
+                remaining_tasks.append(task)
+        
+        return remaining_tasks
+
 # ----------------------------- Forecast Output (optimized) -----------------------------
 
 def append_forecasts(out_path: Path, rows: pd.DataFrame) -> None:
@@ -861,7 +1194,7 @@ def _build_nn(
         target=target,
         quantiles=[quantile],
         forecast_horizons=[horizon],
-        units_per_layer=list(nn_params.get("units_per_layer", [32, 32])),
+        units_per_layer=list(nn_params.get("units_per_layer", [])),
         lags=lags,
         activation=nn_params.get("activation", "relu"),
         device=nn_params.get("device", "cpu"),
@@ -908,7 +1241,7 @@ def _build_nn_global(
         target=target,
         quantiles=[quantile],
         forecast_horizons=[horizon],
-        units_per_layer=list(nn_params.get("units_per_layer", [32, 32])),
+        units_per_layer=list(nn_params.get("units_per_layer", [])),
         lags=lags,
         activation=nn_params.get("activation", "relu"),
         device=nn_params.get("device", "cpu"),
@@ -1231,7 +1564,8 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
         # Try loading from disk if not in cache
         if model_obj is None and cfg["runtime"].get("allow_reload", True) and model_path.exists():
             try:
-                model_obj = joblib.load(model_path)
+                nn_params = cfg_for_model_version(cfg, "nn", task.version)
+                model_obj = _load_nn_global(train_df, target, task.quantile, task.horizon, lags, nn_params, seed=int(cfg.get("seed", 42)), model_path=str(model_path)[:-9])
                 logging.info(f"[CACHE] Loaded model from disk: {model_path}")
                 _global_model_cache[cache_key] = model_obj
             except Exception as e:
@@ -1267,7 +1601,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
             
             # Save model
             try:
-                joblib.dump(model_obj, model_path)
+                model_obj.store_model(str(model_path)[:-9])
                 logging.info(f"[GLOBAL NN] Saved model to {model_path}")
             except Exception as e:
                 logging.warning(f"[SAVE] Could not pickle global NN: {e}")
@@ -1337,6 +1671,7 @@ def execute_single_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Pat
     """
     Execute a single task. Returns True if successful, False if failed.
     This is a wrapper around execute_single_task_batch for backwards compatibility.
+    NOTE: For better performance, use the main loop with SQLite coordinator instead.
     """
     success, task_update, forecast_df = execute_single_task_batch(task, cfg, paths, instance_id)
     
@@ -1356,6 +1691,7 @@ def execute_single_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Pat
 def execute_global_nn_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Path], instance_id: str) -> bool:
     """
     Execute a global NN task. Wrapper around batch version for backwards compatibility.
+    NOTE: For better performance, use the main loop with SQLite coordinator instead.
     """
     success, task_update, forecast_df = execute_global_nn_task_batch(task, cfg, paths, instance_id)
     
@@ -1456,7 +1792,12 @@ def plan_all_tasks(cfg: Dict[str, Any], paths: Dict[str, Path]) -> List[TaskKey]
 # ----------------------------- Main Runner -----------------------------
 
 def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_id: str, worker_index: int = 0) -> None:
-    """Main loop that processes tasks in batches with data caching"""
+    """Main loop that processes tasks in batches with data caching and SQLite coordination"""
+    # Initialize SQLite task coordinator (much faster than Parquet)
+    db_path = paths["output_root"] / "task_coordination.db"
+    coordinator = SQLiteTaskCoordinator(db_path)
+    logging.info(f"Using SQLite task coordination at {db_path}")
+    
     # Plan all possible tasks (this will load and cache all data)
     all_tasks = plan_all_tasks(cfg, paths)
     
@@ -1483,27 +1824,22 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
     
     logging.info(f"Total tasks planned: {len(all_tasks)}")
     
-    # Filter out completed tasks
-    remaining_tasks = filter_completed_tasks(all_tasks, paths["progress_parquet"])
-    logging.info(f"Tasks remaining after filtering completed: {len(remaining_tasks)}")
-    
-    if not remaining_tasks:
-        logging.info("All tasks already completed")
-        return
+    # Worker index 0 cleans up stale claimed tasks on startup
+    if worker_index == 0:
+        logging.info("Worker 0 performing startup cleanup of stale claimed tasks...")
+        stale_count = coordinator.cleanup_stale_claimed_tasks()
+        if stale_count > 0:
+            logging.info(f"Cleaned up {stale_count} stale claimed tasks")
+        else:
+            logging.info("No stale claimed tasks found")
     
     # Get worker configuration
     num_workers = int(cfg.get("runtime", {}).get("num_workers", 1))
     batch_size = int(cfg.get("runtime", {}).get("batch_size", 50))  # Increase batch size significantly
     
-    # Get worker's chunk of tasks
-    worker_tasks = get_worker_chunk(remaining_tasks, worker_index, num_workers, batch_size)
-    
-    if not worker_tasks:
-        logging.info(f"No tasks assigned to worker {worker_index}")
-        return
-    
-    logging.info(f"Worker {worker_index} processing {len(worker_tasks)} out of {len(remaining_tasks)} remaining tasks")
-    logging.info(f"Using batch size: {batch_size}")
+    # Show initial task statistics
+    stats = coordinator.get_statistics()
+    logging.info(f"Initial task statistics: {stats}")
     
     completed = 0
     failed = 0
@@ -1511,17 +1847,45 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
     start_time = time.time()
     
     while True:
-        # Claim batch of tasks
-        task_batch = claim_task_batch(paths["progress_parquet"], worker_tasks, instance_id, batch_size)
+        # Get fresh list of available tasks (not completed, claimed, or failed)
+        available_tasks = coordinator.get_available_tasks(all_tasks)
+        
+        if not available_tasks:
+            logging.info("No more available tasks")
+            break
+        
+        logging.info(f"Found {len(available_tasks)} available tasks")
+        
+        # Get this worker's chunk from available tasks
+        worker_tasks = get_worker_chunk(available_tasks, worker_index, num_workers, batch_size)
+        
+        if not worker_tasks:
+            logging.info(f"No tasks assigned to worker {worker_index} from available tasks")
+            # Wait a bit before checking again
+            time.sleep(5.0)
+            continue
+        
+        logging.info(f"Worker {worker_index} processing {len(worker_tasks)} out of {len(available_tasks)} available tasks")
+        
+        # Claim batch of tasks using fast SQLite coordinator
+        task_batch = coordinator.claim_task_batch(worker_tasks, instance_id, batch_size)
         
         if not task_batch:
             consecutive_no_tasks += 1
             if consecutive_no_tasks >= 3:
                 logging.info("No more tasks available after 3 attempts")
-                break
+                # Check if there are really no available tasks
+                available_check = coordinator.get_available_tasks(all_tasks)
+                if not available_check:
+                    logging.info("Confirmed: no more available tasks")
+                    break
+                else:
+                    logging.info(f"Still {len(available_check)} available tasks, continuing...")
+                    consecutive_no_tasks = 0  # Reset counter
+                    continue
             
             # Wait with exponential backoff before trying again
-            wait_time = min(1.0 * (2 ** (consecutive_no_tasks - 1)), 10.0)
+            wait_time = min(2.0 * (2 ** (consecutive_no_tasks - 1)), 15.0)
             wait_time += random.uniform(0, wait_time * 0.1)  # Add jitter
             logging.info(f"No tasks found, waiting {wait_time:.1f}s before retry")
             time.sleep(wait_time)
@@ -1552,9 +1916,9 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
             if forecast_df is not None:
                 forecast_batch.append((task.quantile, task.horizon, forecast_df))
         
-        # Update all task statuses in a single batch operation
+        # Update all task statuses using fast SQLite coordinator
         if task_updates:
-            update_task_batch_status(paths["progress_parquet"], task_updates, instance_id)
+            coordinator.update_task_status_batch(task_updates, instance_id)
         
         # Append all forecasts in a single batch operation
         if forecast_batch:
@@ -1575,12 +1939,17 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
         logging.info(f"Total progress: {completed} completed, {failed} failed")
         logging.info(f"Timing: batch took {batch_time:.1f}s (avg {batch_avg_time:.1f}s/task), overall avg {avg_time_per_task:.1f}s/task")
         
-        # Show memory usage periodically
+        
+        # Show memory usage and task statistics periodically
         if (completed + failed) % 100 == 0:
             try:
                 process = psutil.Process()
                 memory_mb = process.memory_info().rss / 1024 / 1024
                 logging.info(f"Current memory usage: {memory_mb:.1f} MB")
+                
+                # Show updated task statistics
+                stats = coordinator.get_statistics()
+                logging.info(f"Task statistics: {stats}")
             except:
                 pass
         
@@ -1682,19 +2051,40 @@ def main(argv: Optional[List[str]] = None) -> int:
     
     if args.dry_run:
         logging.info("Running in dry-run mode")
+        # Initialize SQLite coordinator for dry-run too
+        db_path = paths["output_root"] / "task_coordination.db"
+        coordinator = SQLiteTaskCoordinator(db_path)
+        
         all_tasks = plan_all_tasks(cfg, paths)
-        remaining_tasks = filter_completed_tasks(all_tasks, paths["progress_parquet"])
+        
+        # Worker index 0 cleans up stale claimed tasks even in dry-run
+        if args.worker_index == 0:
+            logging.info("Worker 0 performing startup cleanup of stale claimed tasks (dry-run)...")
+            stale_count = coordinator.cleanup_stale_claimed_tasks()
+            if stale_count > 0:
+                logging.info(f"Would clean up {stale_count} stale claimed tasks")
+                print(f"Cleaned up {stale_count} stale claimed tasks")
+            else:
+                logging.info("No stale claimed tasks found")
+                print("No stale claimed tasks found")
+        
+        available_tasks = coordinator.get_available_tasks(all_tasks)
         
         num_workers = int(cfg.get("runtime", {}).get("num_workers", 1))
-        worker_tasks = get_worker_chunk(remaining_tasks, args.worker_index, num_workers, 1)
+        worker_tasks = get_worker_chunk(available_tasks, args.worker_index, num_workers, 1)
+        
+        # Show task statistics
+        stats = coordinator.get_statistics()
         
         print(f"Total tasks planned: {len(all_tasks)}")
-        print(f"Tasks remaining after filtering completed: {len(remaining_tasks)}")
+        print(f"Available tasks (not completed/claimed/failed): {len(available_tasks)}")
         print(f"Tasks assigned to worker {args.worker_index}: {len(worker_tasks)}")
+        print(f"Task statistics: {stats}")
         
         logging.info(f"Total tasks planned: {len(all_tasks)}")
-        logging.info(f"Tasks remaining after filtering completed: {len(remaining_tasks)}")
+        logging.info(f"Available tasks (not completed/claimed/failed): {len(available_tasks)}")
         logging.info(f"Tasks assigned to worker {args.worker_index}: {len(worker_tasks)}")
+        logging.info(f"Task statistics: {stats}")
         
         for i, task in enumerate(worker_tasks[:10]):  # Show first 10
             task_info = f"{i+1}. {task.id()}"

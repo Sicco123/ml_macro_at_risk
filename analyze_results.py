@@ -175,9 +175,9 @@ class QuantileAnalyzer:
                         table_display, dm_results, quantile, horizon, exclude_covid
                     )
                     
-                    # Save readable version
+                    # Save readable version as formatted text
                     filename = f"pinball_q{quantile}_h{horizon}{covid_suffix}"
-                    table_with_stars.to_csv(self.output_dir / 'tables' / f"{filename}.csv")
+                    self._save_formatted_table(table_with_stars, self.output_dir / 'tables' / f"{filename}.txt")
                     
                     # Create LaTeX version
                     latex_table = self._create_latex_table(
@@ -192,7 +192,7 @@ class QuantileAnalyzer:
                     print(f"Created table for q={quantile}, h={horizon}{covid_suffix}")
     
     def _get_dm_results_for_tables(self) -> pd.DataFrame:
-        """Get Diebold-Mariano test results for adding stars to pinball tables."""
+        """Get Diebold-Mariano test results for adding stars to pinball tables using quantile losses."""
         print("Running Diebold-Mariano tests for significance stars...")
         
         benchmark = self.config['analysis']['benchmark_model']
@@ -255,17 +255,25 @@ class QuantileAnalyzer:
                     bench_aligned = benchmark_data[benchmark_data['TIME'].isin(common_times)].sort_values('TIME')
                     model_aligned = model_data[model_data['TIME'].isin(common_times)].sort_values('TIME')
                     
-                    bench_errors = bench_aligned['TRUE_DATA'].values - bench_aligned['FORECAST'].values
-                    model_errors = model_aligned['TRUE_DATA'].values - model_aligned['FORECAST'].values
+                    # Calculate pinball losses for each model
+                    bench_losses = np.array([
+                        self.pinball_loss(np.array([true]), np.array([pred]), quantile)
+                        for true, pred in zip(bench_aligned['TRUE_DATA'].values, bench_aligned['FORECAST'].values)
+                    ])
+                    model_losses = np.array([
+                        self.pinball_loss(np.array([true]), np.array([pred]), quantile)
+                        for true, pred in zip(model_aligned['TRUE_DATA'].values, model_aligned['FORECAST'].values)
+                    ])
                     
-                    # Run DM test
-                    dm_stat, p_value = self.diebold_mariano_test(model_errors, bench_errors, horizon)
+                    # Run DM test: model vs benchmark (negative stat means model is better)
+                    dm_stat, p_value = self.diebold_mariano_test(model_losses, bench_losses, horizon)
                     
                     results.append({
                         'COUNTRY': country,
                         'QUANTILE': quantile,
                         'HORIZON': horizon,
                         'MODEL': model,
+                        'DM_STAT': dm_stat,
                         'P_VALUE': p_value,
                         'COVID_EXCLUDED': exclude_covid
                     })
@@ -292,28 +300,30 @@ class QuantileAnalyzer:
         # Create a copy to modify
         table_with_stars = table.copy()
         
-        # Function to get significance stars
-        def get_stars(p_value):
-            if pd.isna(p_value):
+        # Function to get significance stars - only for models with significantly LOWER loss
+        def get_stars(p_value, dm_stat):
+            if pd.isna(p_value) or pd.isna(dm_stat):
                 return ""
-            elif p_value < 0.01:
-                return "***"
-            elif p_value < 0.05:
-                return "**"
-            elif p_value < 0.10:
-                return "*"
-            else:
-                return ""
+            # Only add stars if model has significantly lower loss (negative DM stat means better)
+            if dm_stat < 0:  # Model is better than benchmark
+                if p_value < 0.01:
+                    return "***"
+                elif p_value < 0.05:
+                    return "**"
+                elif p_value < 0.10:
+                    return "*"
+            return ""
         
         # Add stars to each cell
         for country in table_with_stars.index:
             for model in table_with_stars.columns:
                 if country == 'AVERAGE':
-                    # For average row, use overall significance (can be computed as mean p-value or other logic)
+                    # For average row, use overall significance
                     model_dm = dm_subset[dm_subset['MODEL'] == model]
                     if len(model_dm) > 0:
                         avg_p_value = model_dm['P_VALUE'].mean()
-                        stars = get_stars(avg_p_value)
+                        avg_dm_stat = model_dm['DM_STAT'].mean()
+                        stars = get_stars(avg_p_value, avg_dm_stat)
                     else:
                         stars = ""
                 else:
@@ -324,7 +334,8 @@ class QuantileAnalyzer:
                     ]
                     if len(model_dm) > 0:
                         p_value = model_dm['P_VALUE'].iloc[0]
-                        stars = get_stars(p_value)
+                        dm_stat = model_dm['DM_STAT'].iloc[0]
+                        stars = get_stars(p_value, dm_stat)
                     else:
                         stars = ""
                 
@@ -386,13 +397,53 @@ class QuantileAnalyzer:
         if has_stars:
             latex += "\\begin{tablenotes}\n"
             latex += "\\small\n"
-            latex += "\\item Notes: Significance levels from Diebold-Mariano tests against benchmark model: "
+            latex += "\\item Notes: Significance stars indicate models with significantly lower pinball loss than benchmark (DM test with Harvey correction): "
             latex += "*** p<0.01, ** p<0.05, * p<0.10\n"
             latex += "\\end{tablenotes}\n"
         
         latex += "\\end{table}\n"
         
         return latex
+    
+    def _save_formatted_table(self, df: pd.DataFrame, filepath: str):
+        """Save a DataFrame as a nicely formatted text file with proper column spacing."""
+        with open(filepath, 'w') as f:
+            # Convert all values to strings and handle NaN values
+            df_str = df.copy()
+            for col in df_str.columns:
+                df_str[col] = df_str[col].astype(str).replace('nan', '---')
+            
+            # Calculate column widths
+            col_widths = {}
+            
+            # Check index width
+            index_width = max(len(str(idx)) for idx in df_str.index)
+            index_width = max(index_width, len('Country'))  # Header width
+            
+            # Check column widths
+            for col in df_str.columns:
+                col_width = max(len(str(col)), max(len(str(val)) for val in df_str[col]))
+                col_widths[col] = col_width
+            
+            # Write header
+            header = f"{'Country':<{index_width}}"
+            for col in df_str.columns:
+                header += f" | {col:>{col_widths[col]}}"
+            f.write(header + '\n')
+            
+            # Write separator
+            separator = '-' * index_width
+            for col in df_str.columns:
+                separator += '-+-' + '-' * col_widths[col]
+            f.write(separator + '\n')
+            
+            # Write data rows
+            for idx, row in df_str.iterrows():
+                line = f"{str(idx):<{index_width}}"
+                for col in df_str.columns:
+                    value = str(row[col])
+                    line += f" | {value:>{col_widths[col]}}"
+                f.write(line + '\n')
     
     def plot_forecasts_by_country(self):
         """Create forecast plots for each country."""
@@ -443,14 +494,14 @@ class QuantileAnalyzer:
                             dpi: int = 100, fmt: str = 'png'):
         """Create a single forecast plot."""
         
-        fig, axes = plt.subplots(len(models), 1, figsize=(14, 4 * len(models)), 
+        fig, axes = plt.subplots(4, 1, figsize=(14, 4 * len(models)), 
                                 sharex=True, sharey=True, dpi=dpi)
         if len(models) == 1:
             axes = [axes]
         
         colors = plt.cm.Set1(np.linspace(0, 1, len(quantiles)))
         
-        for i, model in enumerate(models):
+        for i, model in enumerate(models[:4]):
             ax = axes[i]
             model_data = data[data['MODEL_FULL'] == model].copy()
             
@@ -495,21 +546,172 @@ class QuantileAnalyzer:
                    dpi=dpi, bbox_inches='tight')
         plt.close()
     
-    def diebold_mariano_test(self, errors1: np.ndarray, errors2: np.ndarray, 
+    def plot_cumulative_losses(self):
+        """Create cumulative loss plots for each quantile/horizon combination."""
+        print("Creating cumulative loss plots...")
+        
+        quantiles = sorted(self.data['QUANTILE'].unique())
+        horizons = sorted(self.data['HORIZON'].unique())
+        models = sorted(self.data['MODEL_FULL'].unique())
+        countries = sorted(self.data['COUNTRY'].unique())
+        
+        # Configuration options
+        high_quality = self.config['plots'].get('high_quality', False)
+        dpi = 300 if high_quality else 100
+        fmt = 'pdf' if high_quality else 'png'
+        
+        for quantile in quantiles:
+            for horizon in horizons:
+                self._create_cumulative_loss_plot(
+                    quantile, horizon, models, countries, dpi=dpi, fmt=fmt
+                )
+    
+    def _create_cumulative_loss_plot(self, quantile: float, horizon: int, 
+                                   models: List[str], countries: List[str],
+                                   dpi: int = 100, fmt: str = 'png'):
+        """Create a single cumulative loss plot for all countries."""
+        
+        # Filter data for this quantile/horizon
+        data = self.data[
+            (self.data['QUANTILE'] == quantile) & 
+            (self.data['HORIZON'] == horizon)
+        ].copy()
+        
+        if len(data) == 0:
+            print(f"No data for q={quantile}, h={horizon}")
+            return
+        
+        # Calculate grid size for subplots
+        n_countries = len(countries)
+        n_cols = min(4, n_countries)  # Max 4 columns
+        n_rows = int(np.ceil(n_countries / n_cols))
+        
+        # Create figure with extra space at bottom for legend
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows + 1), 
+                                sharex=False, sharey=False, dpi=dpi)
+        
+        # Handle single subplot case
+        if n_countries == 1:
+            axes = [axes]
+        elif n_rows == 1:
+            axes = axes.reshape(1, -1)
+        
+        # Flatten axes for easier indexing
+        axes_flat = axes.flatten() if n_countries > 1 else axes
+        
+        # Colors for models
+        colors = plt.cm.Set1(np.linspace(0, 1, len(models)))
+        model_colors = dict(zip(models, colors))
+        
+        # Store legend handles and labels from first subplot with data
+        legend_handles = []
+        legend_labels = []
+        
+        for i, country in enumerate(countries):
+            ax = axes_flat[i]
+            
+            country_data = data[data['COUNTRY'] == country].copy()
+            
+            if len(country_data) == 0:
+                ax.text(0.5, 0.5, 'No data', transform=ax.transAxes, 
+                       ha='center', va='center', fontsize=12)
+                ax.set_title(country, fontsize=12, fontweight='bold')
+                continue
+            
+            # For each model, calculate cumulative loss
+            for model in models:
+                model_data = country_data[country_data['MODEL_FULL'] == model].copy()
+                
+                if len(model_data) == 0:
+                    continue
+                
+                # Sort by time
+                model_data = model_data.sort_values('TIME')
+                
+                # Calculate pinball losses for each time point
+                losses = []
+                times = []
+                for _, row in model_data.iterrows():
+                    loss = self.pinball_loss(
+                        np.array([row['TRUE_DATA']]),
+                        np.array([row['FORECAST']]),
+                        quantile
+                    )
+                    losses.append(loss)
+                    times.append(row['TIME'])
+                
+                if len(losses) == 0:
+                    continue
+                
+                # Calculate cumulative sum
+                cumulative_losses = np.cumsum(losses)
+                
+                # Plot
+                line = ax.plot(times, cumulative_losses, 
+                             color=model_colors[model], linewidth=2, 
+                             label=model, alpha=0.8)
+                
+                # Collect legend info from first subplot with data
+                if i == 0 and len(legend_handles) < len(models):
+                    legend_handles.append(line[0])
+                    legend_labels.append(model)
+            
+            ax.set_title(country, fontsize=12, fontweight='bold')
+            ax.grid(True, alpha=0.3)
+            ax.tick_params(axis='x', rotation=45)
+            
+            # Highlight COVID period
+            ax.axvspan(self.covid_start, self.covid_end, alpha=0.2, color='red')
+        
+        # Hide empty subplots
+        for j in range(n_countries, len(axes_flat)):
+            axes_flat[j].set_visible(False)
+        
+        # Set common labels
+        fig.text(0.5, 0.08, 'Time', ha='center', fontsize=14)
+        fig.text(0.02, 0.5, 'Cumulative Pinball Loss', va='center', rotation='vertical', fontsize=14)
+        
+        # Main title
+        plt.suptitle(f"Cumulative Pinball Loss: Quantile {quantile}, Horizon {horizon}", 
+                    fontsize=16, fontweight='bold', y=0.96)
+        
+        # Create legend underneath all subplots
+        if legend_handles:
+            fig.legend(legend_handles, legend_labels, 
+                      loc='lower center', 
+                      bbox_to_anchor=(0.5, 0.02),
+                      ncol=min(len(legend_labels), 4),
+                      fontsize=12,
+                      frameon=True,
+                      fancybox=True,
+                      shadow=True)
+        
+        # Tight layout with minimal spacing and extra room for legend
+        plt.tight_layout(rect=[0.02, 0.15, 0.98, 0.94])
+        
+        # Save plot
+        filename = f"cumulative_loss_q{quantile}_h{horizon}.{fmt}"
+        plt.savefig(self.output_dir / 'figures' / filename, 
+                   dpi=dpi, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Created cumulative loss plot for q={quantile}, h={horizon}")
+    
+    def diebold_mariano_test(self, losses1: np.ndarray, losses2: np.ndarray, 
                            h: int = 1) -> Tuple[float, float]:
         """
-        Perform Diebold-Mariano test for forecast accuracy.
+        Perform Diebold-Mariano test for forecast accuracy using quantile losses.
         
         Args:
-            errors1: Forecast errors for model 1
-            errors2: Forecast errors for model 2  
-            h: Forecast horizon (for HAC adjustment)
+            losses1: Pinball losses for model 1
+            losses2: Pinball losses for model 2  
+            h: Forecast horizon (for HAC adjustment and Harvey correction)
             
         Returns:
             DM statistic and p-value
         """
         # Calculate loss differential
-        d = errors1**2 - errors2**2
+        d = losses1 - losses2
         
         # Mean of differences
         d_mean = np.mean(d)
@@ -521,7 +723,7 @@ class QuantileAnalyzer:
             # No autocorrelation adjustment needed
             d_var = np.var(d, ddof=1)
         else:
-            # HAC adjustment for multi-step forecasts
+            # HAC adjustment for multi-step forecasts using Newey-West
             gamma_0 = np.var(d, ddof=1)
             gamma_sum = 0
             
@@ -540,13 +742,20 @@ class QuantileAnalyzer:
         
         dm_stat = d_mean / np.sqrt(d_var / n)
         
+        # Apply Harvey correction for multi-step forecasts
+        if h > 1:
+            # Harvey, Leybourne, and Newbold (1997) correction
+            # Adjust the test statistic to account for finite sample bias
+            correction = np.sqrt((n + 1 - 2*h + h*(h-1)/n) / n)
+            dm_stat = dm_stat * correction
+        
         # Two-sided p-value
         p_value = 2 * (1 - stats.norm.cdf(np.abs(dm_stat)))
         
         return dm_stat, p_value
     
     def run_diebold_mariano_tests(self):
-        """Run Diebold-Mariano tests comparing all models to benchmark."""
+        """Run Diebold-Mariano tests comparing all models to benchmark using quantile losses."""
         print("Running Diebold-Mariano tests...")
         
         benchmark = self.config['analysis']['benchmark_model']
@@ -604,11 +813,18 @@ class QuantileAnalyzer:
                     bench_aligned = benchmark_data[benchmark_data['TIME'].isin(common_times)].sort_values('TIME')
                     model_aligned = model_data[model_data['TIME'].isin(common_times)].sort_values('TIME')
                     
-                    bench_errors = bench_aligned['TRUE_DATA'].values - bench_aligned['FORECAST'].values
-                    model_errors = model_aligned['TRUE_DATA'].values - model_aligned['FORECAST'].values
+                    # Calculate pinball losses for each model
+                    bench_losses = np.array([
+                        self.pinball_loss(np.array([true]), np.array([pred]), quantile)
+                        for true, pred in zip(bench_aligned['TRUE_DATA'].values, bench_aligned['FORECAST'].values)
+                    ])
+                    model_losses = np.array([
+                        self.pinball_loss(np.array([true]), np.array([pred]), quantile)
+                        for true, pred in zip(model_aligned['TRUE_DATA'].values, model_aligned['FORECAST'].values)
+                    ])
                     
-                    # Run DM test
-                    dm_stat, p_value = self.diebold_mariano_test(model_errors, bench_errors, horizon)
+                    # Run DM test: model vs benchmark (negative stat means model is better)
+                    dm_stat, p_value = self.diebold_mariano_test(model_losses, bench_losses, horizon)
                     
                     results.append({
                         'COUNTRY': country,
@@ -631,7 +847,7 @@ class QuantileAnalyzer:
             return dm_results
         
         # Save results
-        dm_results.to_csv(self.output_dir / 'tests' / 'diebold_mariano_results.csv', index=False)
+        dm_results.to_csv(self.output_dir / 'tests' / 'diebold_mariano_results.txt', index=False, sep='\t')
         
         # Create summary tables
         self._create_dm_summary_tables(dm_results)
@@ -656,21 +872,32 @@ class QuantileAnalyzer:
                     if len(data) == 0:
                         continue
                     
-                    # Create significance table
-                    sig_table = data.pivot(index='COUNTRY', columns='MODEL', values='SIGNIFICANT_5PCT')
-                    sig_table = sig_table.astype(str).replace({'True': '***', 'False': '', 'nan': ''})
+                    # Create DM statistic table
+                    dm_stat_table = data.pivot(index='COUNTRY', columns='MODEL', values='DM_STAT')
                     
                     # Create p-value table
                     pval_table = data.pivot(index='COUNTRY', columns='MODEL', values='P_VALUE')
-                    pval_table = pval_table.round(3)
                     
-                    # Combine tables - format p-values as strings first
-                    pval_formatted = pval_table.applymap(lambda x: f"{x:.3f}" if pd.notna(x) else "---")
-                    combined = pval_formatted + sig_table
+                    # Create significance stars table
+                    sig_table = data.pivot(index='COUNTRY', columns='MODEL', values='SIGNIFICANT_5PCT')
+                    sig_table = sig_table.astype(str).replace({'True': '***', 'False': '', 'nan': ''})
+                    
+                    # Combine DM stat with p-value in parentheses and add significance stars
+                    combined = dm_stat_table.copy()
+                    for country in combined.index:
+                        for model in combined.columns:
+                            dm_stat = dm_stat_table.loc[country, model]
+                            p_val = pval_table.loc[country, model]
+                            stars = sig_table.loc[country, model] if model in sig_table.columns else ''
+                            
+                            if pd.notna(dm_stat) and pd.notna(p_val):
+                                combined.loc[country, model] = f"{dm_stat:.3f} ({p_val:.3f}){stars}"
+                            else:
+                                combined.loc[country, model] = "---"
                     
                     # Save
                     filename = f"dm_test_q{quantile}_h{horizon}{covid_suffix}"
-                    combined.to_csv(self.output_dir / 'tests' / f"{filename}.csv")
+                    self._save_formatted_table(combined, self.output_dir / 'tests' / f"{filename}.txt")
                     
                     # LaTeX version
                     latex_table = self._create_latex_table(
@@ -833,7 +1060,7 @@ class QuantileAnalyzer:
             return mcs_results
         
         # Save results
-        mcs_results.to_csv(self.output_dir / 'confidence_sets' / 'mcs_results.csv', index=False)
+        mcs_results.to_csv(self.output_dir / 'confidence_sets' / 'mcs_results.txt', index=False, sep='\t')
         
         # Create summary tables
         self._create_mcs_summary_tables(mcs_results)
@@ -864,7 +1091,7 @@ class QuantileAnalyzer:
                     
                     # Save
                     filename = f"mcs_q{quantile}_h{horizon}{covid_suffix}"
-                    inclusion_table.to_csv(self.output_dir / 'confidence_sets' / f"{filename}.csv")
+                    self._save_formatted_table(inclusion_table, self.output_dir / 'confidence_sets' / f"{filename}.txt")
                     
                     # LaTeX version
                     latex_table = self._create_latex_table(
@@ -903,16 +1130,17 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ## Output Files Generated
 ### Tables
-- Pinball loss tables (CSV and LaTeX): `tables/` and `latex/`
+- Pinball loss tables (TXT and LaTeX): `tables/` and `latex/`
 - Diebold-Mariano test results: `tests/`
 - Model Confidence Set results: `confidence_sets/`
 
 ### Figures
 - Forecast plots by country: `figures/`
+- Cumulative loss plots: `figures/`
 
 ### Tests
-- Diebold-Mariano test results: `tests/diebold_mariano_results.csv`
-- Model Confidence Set results: `confidence_sets/mcs_results.csv`
+- Diebold-Mariano test results: `tests/diebold_mariano_results.txt`
+- Model Confidence Set results: `confidence_sets/mcs_results.txt`
 """
         
         with open(self.output_dir / 'analysis_report.md', 'w') as f:
@@ -931,6 +1159,9 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         
         # Create forecast plots
         self.plot_forecasts_by_country()
+        
+        # Create cumulative loss plots
+        self.plot_cumulative_losses()
         
         # Run statistical tests
         self.run_diebold_mariano_tests()

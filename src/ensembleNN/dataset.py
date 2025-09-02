@@ -74,18 +74,18 @@ class CountryTimeSeriesDataset(Dataset):
                 logger.warning(f"Converting feature array {i} from {feat.dtype} to float64")
                 all_features[i] = feat.astype(np.float64)
         
+
         # Concatenate all countries
         self.features = np.vstack(all_features)
         self.targets = np.vstack(all_targets)
 
+        del all_features
+        del all_targets
         
         # Debug: Check dtype right after stacking
         logger.debug(f"After vstack - features dtype: {self.features.dtype}, targets dtype: {self.targets.dtype}")
 
-        self.countries = np.array(all_countries)
-        # expand dims witht two dims
-        self.countries = np.expand_dims(self.countries, axis=1)
-        self.countries = np.expand_dims(self.countries, axis=2)
+        self.countries = np.array(all_countries).reshape(-1, 1, 1)
 
         self.times = all_times
 
@@ -180,46 +180,52 @@ class CountryTimeSeriesDataset(Dataset):
             Tuple of (features, targets) where targets shape is (H,) for H horizons
         """
         try:
-            # Get data
-            features_data = self.features[idx]
-            targets_data = self.targets[idx]
-            country_codes = self.countries[idx]
+            # # Get data
+            # features_data = self.features[idx]
+            # targets_data = self.targets[idx]
+            # country_codes = self.countries[idx]
             
-            # Robust conversion to float64 - multiple fallback strategies
-            def safe_convert_to_float64(data, name, idx):
-                """Safely convert data to float64 with multiple fallback strategies."""
-                if isinstance(data, np.ndarray) and data.dtype == np.float64:
-                    return data
+            # # Robust conversion to float64 - multiple fallback strategies
+            # def safe_convert_to_float64(data, name, idx):
+            #     """Safely convert data to float64 with multiple fallback strategies."""
+            #     if isinstance(data, np.ndarray) and data.dtype == np.float64:
+            #         return data
                 
-                # Strategy 1: Direct astype conversion
-                try:
-                    return np.array(data, dtype=np.float64)
-                except (ValueError, TypeError):
-                    pass
+            #     # Strategy 1: Direct astype conversion
+            #     try:
+            #         return np.array(data, dtype=np.float64)
+            #     except (ValueError, TypeError):
+            #         pass
                 
-                # Strategy 2: Element-wise conversion
-                try:
-                    if data.ndim == 1:
-                        return np.array([float(x) if pd.notna(x) and x is not None else 0.0 for x in data], dtype=np.float64)
-                    else:
-                        return np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in data], dtype=np.float64)
-                except (ValueError, TypeError):
-                    pass
+            #     # Strategy 2: Element-wise conversion
+            #     try:
+            #         if data.ndim == 1:
+            #             return np.array([float(x) if pd.notna(x) and x is not None else 0.0 for x in data], dtype=np.float64)
+            #         else:
+            #             return np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in data], dtype=np.float64)
+            #     except (ValueError, TypeError):
+            #         pass
                 
-                # Strategy 3: Last resort - create zeros with same shape
-                logger.error(f"All conversion strategies failed for {name} at index {idx}, creating zeros")
-                if hasattr(data, 'shape'):
-                    return np.zeros(data.shape, dtype=np.float64)
-                else:
-                    return np.zeros(len(data) if hasattr(data, '__len__') else 1, dtype=np.float64)
+            #     # Strategy 3: Last resort - create zeros with same shape
+            #     logger.error(f"All conversion strategies failed for {name} at index {idx}, creating zeros")
+            #     if hasattr(data, 'shape'):
+            #         return np.zeros(data.shape, dtype=np.float64)
+            #     else:
+            #         return np.zeros(len(data) if hasattr(data, '__len__') else 1, dtype=np.float64)
             
-            features_data = safe_convert_to_float64(features_data, "features", idx)
-            targets_data = safe_convert_to_float64(targets_data, "targets", idx)
+            # features_data = safe_convert_to_float64(features_data, "features", idx)
+            # targets_data = safe_convert_to_float64(targets_data, "targets", idx)
             
-            # Convert to tensors
-            features = torch.FloatTensor(features_data)
-            targets = torch.FloatTensor(targets_data)
-            country_codes = torch.IntTensor(country_codes)
+            # # Convert to tensors
+            # features = torch.FloatTensor(features_data)
+            # targets = torch.FloatTensor(targets_data)
+            # country_codes = torch.IntTensor(country_codes)
+            # return features, targets, country_codes
+            # Avoid intermediate numpy arrays
+            features = torch.from_numpy(self.features[idx]).float()
+            targets = torch.from_numpy(self.targets[idx]).float()
+            country_codes = torch.from_numpy(self.countries[idx]).int()
+            
             return features, targets, country_codes
 
         except Exception as e:

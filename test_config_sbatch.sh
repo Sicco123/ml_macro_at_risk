@@ -1,25 +1,21 @@
-#!/bin/bash
+#!/bin/bash -l
+#SBATCH --job-name=neural_macro
+#SBATCH --output=out/%x_%j.out
+#SBATCH --partition=genoa
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=24
+#SBATCH --mail-user=s.h.kooiker@vu.nl
+#SBATCH --mail-type=end,fail
+#SBATCH --time=1:00:00
 
-# Launch multiple workers for parallel processing
-# Usage: ./launch_workers.sh <config_file> [num_workers]
+cd $HOME/ml_macro_at_risk
 
-if [ $# -lt 1 ]; then
-    echo "Usage: $0 <config_file> [num_workers]"
-    echo "Example: $0 test_config.yaml 14"
-    exit 0.1
-fi
-
-CONFIG_FILE="$1"
-NUM_WORKERS="${2:-14}"  # Default to 14 workers if not specified
+CONFIG_FILE=test_config_sub.yaml
+NUM_WORKERS=24  # Default to 14 workers if not specified
 
 echo "Launching $NUM_WORKERS workers with config: $CONFIG_FILE"
 
-# create dir
-#mkdir -p /scratch-local/skooiker/
-
-# copy code
-#cp -r /home/skooiker/ml_macro_at_risk /scratch-local/skooiker/
-#cd /scratch-local/skooiker/ml_macro_at_risk || { echo "Failed to change directory"; exit 1; }
 
 module load 2023 PyTorch/2.1.2-foss-2023a SciPy-bundle/2023.07-gfbf-2023a matplotlib/3.7.2-gfbf-2023a scikit-learn/1.3.1-gfbf-2023a PyYAML/6.0-GCCcore-12.3.0 statsmodels/0.14.1-gfbf-2023a tqdm/4.66.1-GCCcore-12.3.0 typing-extensions/4.9.0-GCCcore-12.3.0
 source .venv/bin/activate
@@ -79,10 +75,6 @@ done
 echo "All $NUM_WORKERS workers started in background"
 echo "To monitor progress, check the log files in outputs/logs/"
 echo "To stop all workers, run: pkill -f 'python quant_runner_2.py'"
-
-# move results back to home
-
-
 
 # Wait for all background jobs to complete
 wait
