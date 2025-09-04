@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mail-user=s.h.kooiker@vu.nl
 #SBATCH --mail-type=end,fail
-#SBATCH --time=1:00:00
+#SBATCH --time=2:00:00
 
 cd $HOME/ml_macro_at_risk
 

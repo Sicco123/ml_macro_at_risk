@@ -10,19 +10,19 @@ data:
   country_col: COUNTRY                 # optional; if missing we infer from filename
   target: prc_hicp_manr_CP00
   lags: []               # if empty, defaults to 1..window_size
-  horizons: [6, 12]
-  quantiles: [0.05,0.9,0.95]
+  horizons: [1]
+  quantiles: [0.05,0.1,0.25, 0.5, 0.75,0.9,0.95]
   missing: forward_fill_then_mean      # forward fill, then mean imputation
 
 rolling_window:
-  size: 192                             # training window size (in periods)
+  size: 141                             # training window size (in periods)
   step: 1                              # how many periods to advance the window
   start: auto                          # 'auto' => use splits.test_cutoff
   end: auto                            # 'auto' => last available date
 
 splits:
   test_cutoff: "2016-01-01"            # if rolling_window.start == auto
-  min_train_points: 24                 # minimum obs required to train
+  min_train_points: 12                 # minimum obs required to train
 
 runtime:
   allow_reload: false                  # load existing model if present
@@ -62,7 +62,7 @@ models:
       - name: T192
         params:
           solver: huberized
-          alphas: [ 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
+          alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
           use_cv: true
           cv_splits: 10
 
@@ -78,8 +78,8 @@ models:
           learning_rate: 5.0e-5
           epochs: 1500
           batch_size: 32
-          patience: 50
+          patience: 5
           parallel_models: 10
           device: cpu
-          l2_penalty: 1.0e-4
+          l2_penalty: 0.0
           validation_size: 0.3
