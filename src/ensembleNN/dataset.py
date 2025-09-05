@@ -132,12 +132,12 @@ class CountryTimeSeriesDataset(Dataset):
     def _process_country_data(self, df: pd.DataFrame, country_code: str) -> Tuple[np.ndarray, np.ndarray, List]:
         """Process data for a single country."""
         # Determine feature columns
-        feature_cols = [f"{self.target_col}_untransformed"]
+        feature_cols = [self.target_col]#f"{self.target_col}_untransformed"]
         target_cols = []
         horizon_target_cols = [f"{self.target_col}_h{h}_q{q}" for h in self.horizons for q in self.quantiles]
 
         for col in df.columns:
-            if col == self.time_col or col == f"{self.target_col}_untransformed" :
+            if col == self.time_col or col == f"{self.target_col}_untransformed" or col == self.target_col:
                
                 continue
             # if {target_col}_h{horizon} = col continue 

@@ -132,22 +132,23 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                             mean = transform_params['mean']
                             std = transform_params['std']
                             
-                            if col == self.target:
-                                # Store untransformed version for features
-                                pred_target_data[country][col+"_untransformed"] = df[col].copy()
-                                # Apply transformation
-                                pred_target_data[country][col] = (df[col] - mean) / std
-                            else:
-                                pred_target_data[country][col] = (df[col] - mean) / std
+                            # if col == self.target:
+                            #     # Store untransformed version for features
+                            #     pred_target_data[country][col+"_untransformed"] = df[col].copy()
+                            #     # Apply transformation
+                            #     pred_target_data[country][col] = (df[col] - mean) / std
+                            # else:
+                            pred_target_data[country][col] = (df[col] - mean) / std
                 else:
                     logger.warning(f"No transformations found for country {country}. Using raw data.")
                     # Even when no transformations, create the untransformed column that dataset expects
-                    if self.target in df.columns:
-                        pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
+                    # if self.target in df.columns:
+                    #     pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
         else:
             # No transformations available - create untransformed columns for all countries
             for country, df in pred_target_data.items():
                 if self.target in df.columns:
+                    continue
                     pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
 
      
@@ -165,8 +166,12 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         
         # Make predictions
         predictions, _ = self.trainer.predict(pred_loader)
-        
-        
+
+        # detransform predictions by inverse transformation of target
+        mean_target = self.transformations[country_id][self.target]['mean']
+        std_target = self.transformations[country_id][self.target]['std']
+        predictions = predictions * std_target + mean_target
+
         # Add AR part back to predictions
         #predictions = self._add_AR_part(predictions, country_id, pred_target_data_raw)  
 
@@ -192,12 +197,19 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
         self.parallel_models = parallel_models
         #self._prefit()
-        intercepts, phis = self._get_AR_terms()
-        self.intercepts = intercepts
-        self.phis = phis
+
+
+
+        self.features_and_targets = self._per_quantile_per_horizon_targets(self.features_and_targets)
+
+
+
         self._pretransform()
-        
-        
+        intercepts, phis = self._get_AR_terms()
+        self.intercepts = intercepts 
+        self.phis = phis 
+
+
         train_loaders, val_loaders = create_data_loaders(
             self.features_and_targets,
             parallel_models,  # This should be the ensemble size
@@ -317,7 +329,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         if hasattr(self, 'transformations'):
             # Get columns to normalize (exclude TIME and target columns)
             target_cols = [f"{self.target}_h{h}_q{q}" for h in self.forecast_horizons for q in self.quantiles]
-            exclude_cols = ["TIME"] + target_cols
+            exclude_cols = ["TIME"] #+ target_cols
             all_cols = self.features_and_targets[next(iter(self.features_and_targets))].columns.tolist()
             cols_to_normalize = [col for col in all_cols if col not in exclude_cols]
 
@@ -365,16 +377,20 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     
                 for col in cols_to_normalize:
                     if col in df.columns and col in global_transformations:
+                      
                         # Recreate normalization function from stored parameters
                         mean = global_transformations[col]['mean']
                         std = global_transformations[col]['std']
                         
-                        if col == self.target:
-                             self.features_and_targets[country][col+"_untransformed"] = df[col]
-                             self.features_and_targets[country][col] = (df[col] - mean) / std
-                             continue
+                        # if col == self.target:
+                        #      self.features_and_targets[country][col+"_untransformed"] = df[col]
+                        #      self.features_and_targets[country][col] = (df[col] - mean) / std
+                        #      continue
 
                         self.features_and_targets[country][col] = (df[col] - mean) / std
+       
+
+
                 
                 if self.verbose >= 2:
                     normalized_cols = [col for col in cols_to_normalize if col in df.columns]
@@ -395,14 +411,15 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
     
         for country, df in self.features_and_targets.items():
             self._fit_AR_models(df, country)
+        
             for q_idx, q in enumerate(self.quantiles):  # Use enumerate to get proper index
                 for h_idx, h in enumerate(self.forecast_horizons):  # Use enumerate for horizons too
-                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params.iloc[0]
-                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}"].params.iloc[1]
+                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].params.iloc[0]
+                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].params.iloc[1]
 
             idx += 1
 
-        self.features_and_targets = self._per_quantile_per_horizon_targets(self.features_and_targets)
+      
         
         return intercepts, phis
     
@@ -458,21 +475,21 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         
          # get ar data before transformation
 
-        horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons] 
+        horizon_targets = [f"{self.target}_h{h}_q{q}" for h in self.forecast_horizons for q in self.quantiles]
         q_models = {}
+       
         for q in self.quantiles:
             hor_models = {}
-            for col in horizon_targets:
+            for h in self.forecast_horizons:
                 X = df[self.target]
-                y = df[col]
+                y = df[f"{self.target}_h{h}_q{q}"]
                 X = sm.add_constant(X)  # Add constant term for intercept
                 # linear quantile regression from X on y 
                 # set seed 
                 np.random.seed(42)
                 model = sm.QuantReg(y, X)
                 fitted_model = model.fit(q=q)
-                hor_models[col] = fitted_model
-
+                hor_models[f"{self.target}_h{h}_q{q}"] = fitted_model
 
             q_models[q] = hor_models
         self.ar_models[country] = q_models
@@ -482,21 +499,22 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         horizon_targets = [f"{self.target}_h{h}" for h in self.forecast_horizons]
 
         for q in self.quantiles:
-            for col in horizon_targets:
+            for h in self.forecast_horizons:
                 X = sm.add_constant(df[self.target])
-                df[f'{col}_q{q}'] = df[col] - self.ar_models[country][q][col].predict(X)
+                df[f'{h}_q{q}'] = df[h] - self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].predict(X)
         # remove horizon targets from df
-        for col in horizon_targets:
-            if f"{col}_q{q}" in df.columns:
-                df.drop(columns=[f"{col}"], inplace=True)
+        for q in self.quantiles:
+            for h in self.forecast_horizons:
+                if f"{self.target}_h{h}_q{q}" in df.columns:
+                    df.drop(columns=[f"{self.target}_h{h}_q{q}"], inplace=True)
         return df
 
     def _add_AR_part(self, predictions, country, pred_target_data):  # Fixed return type annotation
         """Add AR part to predictions."""
         for qdx, q in enumerate(self.quantiles):
             for hdx, h in enumerate(self.forecast_horizons):
-                model_name = f"{self.target}_h{h}"
-                
+                model_name = f"{self.target}_h{h}_q{q}"
+
                 X = sm.add_constant(pred_target_data[self.target])
 
                 predictions[:, qdx, hdx] += self.ar_models[country][q][model_name].predict(X)

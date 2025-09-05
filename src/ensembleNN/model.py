@@ -42,6 +42,7 @@ class FastNN(nn.Module):
         prev = input_dim
         for u in units_per_layer:
             layers.append(nn.Linear(prev, u))
+            layers.append(nn.BatchNorm1d(u))
             layers.append(_make_activation(activation))
             prev = u
 
@@ -71,6 +72,7 @@ class AR_per_country(nn.Module):
         super().__init__()
         self.intercepts = intercepts
         self.phis = phis
+
         self.quantiles = quantiles
         self.horizons = horizons
 
@@ -133,11 +135,18 @@ class EnsembleNN(nn.Module):
             FastNN(input_dim, quantiles, forecast_horizons, units_per_layer, activation)
             for _ in range(n_models)
         ])
+        
+
+        # compile models
+        self.models.compile()
+           
 
         self.ar_models = nn.ModuleList([
             AR_per_country(intercepts_init, phis_init, quantiles, forecast_horizons)
             for _ in range(n_models)
         ])
+
+        self.ar_models.compile()
 
         #logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
@@ -147,13 +156,13 @@ class EnsembleNN(nn.Module):
         if per_model_inputs:
             # x[i] is (batch, features), need to extract first feature for AR
             ensemble = torch.stack([
-                m(x[i,:,1:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
+                m(x[i,:,:]) + 0*ar_m(x[i, :, 0:1], country_codes[i]) 
                 for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
             ], dim=0)
         else:
             # x is (batch, features), extract first feature for AR  
             ensemble = torch.stack([
-                m(x[:, 1:]) + ar_m(x[:, 0:1], country_codes)
+                m(x[:, :])+ 0*ar_m(x[:, 0:1], country_codes)
                 for m, ar_m in zip(self.models, self.ar_models)
             ], dim=0)
         

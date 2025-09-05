@@ -110,6 +110,18 @@ class EnsembleNNTrainer:
         # Store best model states for each ensemble member
         self.best_model_states = [None] * model.n_models
 
+    def _freeze_ar_parameters(self):
+        """Freeze phi_tensors and intercept_tensors parameters."""
+        for param_name, param in self.model.named_parameters():
+            if 'phi_tensors' in param_name or 'intercept_tensors' in param_name:
+                param.requires_grad = False
+
+    def _unfreeze_ar_parameters(self):
+        """Unfreeze phi_tensors and intercept_tensors parameters."""
+        for param_name, param in self.model.named_parameters():
+            if 'phi_tensors' in param_name or 'intercept_tensors' in param_name:
+                param.requires_grad = True
+
     def _get_optimizer(
         self,
         optimizer_type: OptimizerType,
@@ -156,15 +168,9 @@ class EnsembleNNTrainer:
 
             predictions = self.model(features, country_codes, return_ensemble=True)
 
-            loss_ex_penalty = self.loss_fn(predictions, targets, ensemble=True)
+            loss= self.loss_fn(predictions, targets, ensemble=True)
 
-            # Add L2 regularization
-            if l2 > 0.0:
-                l2_loss = sum(p.pow(2).sum() for p in self.model.parameters())
-                loss = loss_ex_penalty + l2 * l2_loss
-            else:
-                loss = loss_ex_penalty
-
+          
             loss.backward()
             optimizer.step()
             
@@ -208,7 +214,8 @@ class EnsembleNNTrainer:
         for param in baseline_model.parameters():
             param.data.zero_()
 
-        
+        baseline_model.ar_models = copy.deepcopy(self.model.ar_models)
+
         total_losses = torch.zeros(self.model.n_models, device=self.device)
         n_batches = 0
 
@@ -235,8 +242,65 @@ class EnsembleNNTrainer:
                 }
 
         return (total_losses / max(n_batches, 1)).tolist()
+    
+    def loss_array(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Pinball loss (a.k.a. quantile loss), vectorized.
+
+        Args:
+            predictions: (E, B, Q, H) if ensemble=True, else (B, Q, H)
+            targets:     (B, H) or (B, Q, H)
+        Returns:
+            Scalar loss (mean over ensemble, batch, quantiles, horizons)
+        """
+        E, B, Q, H = predictions.shape
+
+        # Expand targets: (E, B, H) -> (E, B, Q, H)
+
+        # targets = targets.unsqueeze(2).expand(-1, -1, Q, -1)
+
+        # Quantiles shaped to (1,1,Q,1) for broadcasting
+        q = torch.as_tensor(self.quantiles, device=predictions.device, dtype=predictions.dtype).view(1, 1, Q, 1)
+
+        # Compute error and pinball loss
+        err = targets - predictions                      # (E, B, Q, H)
+        loss = torch.where(err >= 0, q * err, (q - 1.0) * err)
+        return loss
+        
+    def init_scaling(self,val_loaders: List[DataLoader] = None):
+
+        # run a single pass through the data and get the sd of the residuals
+        baseline_model = copy.deepcopy(self.model)
+        # for parameter and bias in baseline model set everything to zero
+        for param in baseline_model.parameters():
+            param.data.zero_()
+            param.requires_grad = False
+        baseline_model.ar_models = copy.deepcopy(self.model.ar_models)
 
 
+        baseline_model.eval()
+        all_baseline_residuals = []
+        with torch.no_grad():
+            for batches in zip(*val_loaders):
+                features_list, targets_list, country_codes_list = zip(*batches)
+                features = torch.stack([f.to(self.device) for f in features_list])
+                targets  = torch.stack([t.to(self.device) for t in targets_list])
+                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
+
+               
+                baseline_preds = baseline_model(features, country_codes, return_ensemble=True)
+                baseline_residuals = self.loss_array(baseline_preds*4, targets*4).cpu().numpy()
+                all_baseline_residuals.append(baseline_residuals)
+
+
+        all_baseline_residuals = np.concatenate(all_baseline_residuals, axis=1)
+        all_baseline_residuals = np.concatenate(all_baseline_residuals, axis=0)
+        baseline_output_sd = all_baseline_residuals.std(axis=0)
+        # baseline output mean
+        baseline_output_mean = all_baseline_residuals.mean(axis=0)
+
+        return baseline_output_mean, baseline_output_sd
+    @torch.compile
     def fit(
         self,
         train_loaders: List[DataLoader],
@@ -259,6 +323,7 @@ class EnsembleNNTrainer:
             optimizer_type: Type of optimizer
             patience: Early stopping patience
             verbose: Verbosity level
+            freeze_ar_epochs: Number of epochs to freeze AR parameters (phi_tensors, intercept_tensors)
             
         Returns:
             Training history
@@ -266,20 +331,22 @@ class EnsembleNNTrainer:
 
        
 
-        optimizer = self._get_optimizer(optimizer_type, learning_rate)
+        optimizer = self._get_optimizer(optimizer_type, learning_rate, l2)
         early_stopping = EarlyStopping(patience, ensemble_size=self.model.n_models) if val_loader is not None else None
 
         best_val_losses = np.array([np.inf] * self.model.n_models)
 
-        # initialize validation
-        
+     
+
         # Initialize train losses with empty lists
         self.train_losses = []
         self.val_losses = [self.initialize_validation(val_loader)]
+       
 
         # Add tqdm  
         pbar = tqdm(range(epochs), desc="Training", disable=verbose < 1)
         for epoch in pbar:
+       
             # Training
             train_loss = self.train_epoch(train_loaders, optimizer, l2, verbose >= 2)
             
