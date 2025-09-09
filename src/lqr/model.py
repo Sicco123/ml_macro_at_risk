@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
+from scipy.sparse import spdiags
 from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.model_selection import KFold
 from typing import List, Dict, Optional, Tuple, Literal
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 SolverType = Literal["huberized", "linear_programming"]
 
 
-def huberized_pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
+def pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
                           quantile: float, alpha: float) -> float:
     """Huberized pinball loss with L2 regularization.
     
@@ -48,7 +49,7 @@ def huberized_pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray,
     return np.mean(pinball) + reg_term
 
 
-def huberized_pinball_gradient(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
+def pinball_gradient(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
                               quantile: float, alpha: float) -> np.ndarray:
     """Gradient of huberized pinball loss.
     
@@ -90,6 +91,138 @@ def huberized_pinball_gradient(params: np.ndarray, X: np.ndarray, y: np.ndarray,
     else:
         return grad_coef
 
+def bound(x: np.ndarray, dx: np.ndarray) -> np.ndarray:
+    """Allowed step lengths for interior-point method (componentwise)."""
+    b = np.full_like(x, 1e20, dtype=float)
+    neg = dx < 0
+    b[neg] = -x[neg] / dx[neg]
+    return b
+
+
+def lp_fnm(A: np.ndarray, c: np.ndarray, b: np.ndarray, u: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """
+    Solve LP by interior-point method (Morillo & Koenker 'lp_fnm').
+    min c^T x   s.t.  A x = b,   0 < x < u
+    Returns the dual vector y associated with A x = b.
+    """
+    # constants
+    beta  = 0.9995
+    small = 1e-5
+    max_it = 50
+
+    # shapes
+    m, n = A.shape  # A: (m rows) x (n cols); x, c, u, z, w, s are length n; y length m
+
+    # ensure float and 1-D shapes
+    A = np.asarray(A, float)
+    c = np.asarray(c, float).reshape(-1)
+    b = np.asarray(b, float).reshape(-1)
+    u = np.asarray(u, float).reshape(-1)
+    x = np.asarray(x, float).reshape(-1)
+
+    # initial feasible point
+    s = u - x                                      # slack > 0
+    # MATLAB: y = (A' \ c')'  == least squares solve A^T y ≈ c
+    # Solve min ||A^T y - c|| -> (using lstsq on A^T)
+    y = np.linalg.lstsq(A.T, c, rcond=None)[0]     # y in R^m
+    r = c - A.T @ y                                # residual in R^n
+    r = r + 0.001 * (r == 0)                       # avoid exact zeros (PE 2004)
+    z = np.maximum(r, 0.0)                         # z >= 0
+    w = z - r                                      # w >= 0, and r = z - w
+    gap = float(c @ x - y @ b + w @ u)             # primal-dual gap
+
+    it = 0
+    while (gap > small) and (it < max_it):
+        it += 1
+
+        # --- Affine step ---
+        q = 1.0 / (z / x + w / s)                  # n-vector
+        rzw = z - w                                # equals `r` in the MATLAB loop
+
+        # Q = diag(sqrt(q)); AQ = A @ Q; rhs = Q @ rzw
+        Q_sqrt = np.sqrt(q)
+        AQ  = A * Q_sqrt                           # column-scale A by sqrt(q)
+        rhs = Q_sqrt * rzw
+
+        # MATLAB: dy = (AQ' \ rhs)'  -> solve AQ.T * dy = rhs (least squares)
+        dy = np.linalg.lstsq(AQ.T, rhs, rcond=None)[0]   # m-vector
+
+        dx = q * (A.T @ dy - rzw)                  # n-vector
+        ds = -dx
+        dz = -z * (1.0 + dx / x)
+        dw = -w * (1.0 + ds / s)
+
+        # step lengths
+        fx = bound(x, dx)
+        fs = bound(s, ds)
+        fw = bound(w, dw)
+        fz = bound(z, dz)
+        fp = min(float(fx.min()), float(fs.min()))
+        fd = min(float(fw.min()), float(fz.min()))
+        fp = min(beta * fp, 1.0)
+        fd = min(beta * fd, 1.0)
+
+        # --- Centering / correction if not full step ---
+        if min(fp, fd) < 1.0:
+            mu = float(z @ x + w @ s)
+            g  = float((z + fd*dz) @ (x + fp*dx) + (w + fd*dw) @ (s + fp*ds))
+            mu = mu * (g / mu)**3 / (2.0 * n)
+
+            dxdz = dx * dz
+            dsdw = ds * dw
+            xinv = 1.0 / x
+            sinv = 1.0 / s
+            xi   = mu * (xinv - sinv)             # n-vector
+
+            # rhs <- rhs + Q * (dxdz - dsdw - xi)
+            rhs2 = rhs + Q_sqrt * (dxdz - dsdw - xi)
+
+            # dy from AQ.T dy = rhs2
+            dy = np.linalg.lstsq(AQ.T, rhs2, rcond=None)[0]
+
+            dx = q * (A.T @ dy + xi - rzw - dxdz + dsdw)
+            ds = -dx
+            dz = mu * xinv - z - xinv * z * dx - dxdz
+            dw = mu * sinv - w - sinv * w * ds - dsdw
+
+            # recompute step lengths
+            fx = bound(x, dx)
+            fs = bound(s, ds)
+            fw = bound(w, dw)
+            fz = bound(z, dz)
+            fp = min(float(fx.min()), float(fs.min()))
+            fd = min(float(fw.min()), float(fz.min()))
+            fp = min(beta * fp, 1.0)
+            fd = min(beta * fd, 1.0)
+
+        # take the step
+        x = x + fp * dx
+        s = s + fp * ds
+        y = y + fd * dy
+        w = w + fd * dw
+        z = z + fd * dz
+
+        # update gap
+        gap = float(c @ x - y @ b + w @ u)
+
+    return y
+
+
+def rq_fnm(X: np.ndarray, y: np.ndarray, p: float) -> np.ndarray:
+    """
+    Quantile regression via dual LP (Koenker). Returns beta-hat.
+    X: (m x n), y: (m,), p in (0,1)
+    """
+    X = np.asarray(X, float)
+    y = np.asarray(y, float).reshape(-1)
+    m, n = X.shape
+
+    u = np.ones(m, dtype=float)              # bounds for x (length m = #obs)
+    a = (1.0 - p) * u                        # feasible initial x, 0 < a < u
+
+    # Solve dual LP to get beta: b = -lp_fnm(X', -y', X' a, u, a)'
+    beta = -lp_fnm(X.T, -y, X.T @ a, u, a)
+    return beta
 
 class QuantileRegressor(BaseEstimator, RegressorMixin):
     """Single quantile regressor with L2 regularization."""
@@ -141,16 +274,29 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         self.n_features_in_ = X.shape[1]
         
         if self.solver == "huberized":
-            self._fit_huberized(X, y)
+            self._fit(X, y)
         else:
             raise ValueError(f"Unknown solver: {self.solver}")
         
         return self
     
-    def _fit_huberized(self, X: np.ndarray, y: np.ndarray) -> None:
-        """Fit using huberized pinball loss."""
+    def _fit(self, X: np.ndarray, y: np.ndarray) -> None:
+        """Fit using  pinball loss."""
         X = np.ascontiguousarray(X, dtype=np.float64)
         y = np.ascontiguousarray(y, dtype=np.float64)
+
+        # If no regularization, use linear programming approach
+        if self.alpha == 0.0:
+            if self.fit_intercept:
+                # Add intercept column
+                X_with_intercept = np.column_stack([np.ones(X.shape[0]), X])
+                coef_with_intercept = rq_fnm(X_with_intercept, y, self.quantile)
+                self.intercept_ = coef_with_intercept[0]
+                self.coef_ = coef_with_intercept[1:]
+            else:
+                self.intercept_ = 0.0
+                self.coef_ = rq_fnm(X, y, self.quantile)
+            return
 
         p = X.shape[1]
         if self.fit_intercept:
@@ -160,10 +306,10 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
             init = np.zeros(p, dtype=np.float64)
 
         result = minimize(
-            fun=huberized_pinball_loss,      # keep your existing function
+            fun=pinball_loss,      # keep your existing function
             x0=init,
             args=(X, y, self.quantile, self.alpha),
-            jac=huberized_pinball_gradient,  # keep your existing gradient
+            jac=pinball_gradient,  # keep your existing gradient
             method="L-BFGS-B",
             options={"maxiter": self.max_iter, "ftol": self.tol}
         )
@@ -189,6 +335,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
             Predictions
         """
         X = np.asarray(X)
+
         return X @ self.coef_ + self.intercept_
     
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
@@ -391,3 +538,5 @@ def cross_validate_alpha(
         alpha_scores[alpha] = np.mean(all_scores)
     
     return alpha_scores
+
+

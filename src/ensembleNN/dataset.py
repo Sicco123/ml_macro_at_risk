@@ -21,7 +21,8 @@ class CountryTimeSeriesDataset(Dataset):
         horizons: List[int],
         lags: List[int] = [1],
         time_col: str = "TIME",
-        exclude_contemp_target: bool = False
+        exclude_contemp_target: bool = False, 
+        one_country_idx: Optional[int] = 0,
     ):
         """Initialize dataset.
         
@@ -40,6 +41,7 @@ class CountryTimeSeriesDataset(Dataset):
         self.lags = lags
         self.time_col = time_col
         self.exclude_contemp_target = exclude_contemp_target
+        self.one_country_idx = one_country_idx  # If only one country, use this index
         
         # Build feature matrix and targets
         self._build_dataset()
@@ -51,16 +53,28 @@ class CountryTimeSeriesDataset(Dataset):
         all_countries = []
         all_times = []
 
-        idx = 0
-        for country_code, df in self.data.items():
+        # if len self.data.items() > 1
+        if len(self.data.items()) > 1:
+            idx = 0
+            for country_code, df in self.data.items():
+                features, targets, times = self._process_country_data(df, country_code)
+                country_code_int = idx
+                if len(features) > 0:
+                    all_features.append(features)
+                    all_targets.append(targets)
+                    all_countries.extend([country_code_int] * len(features))
+                    all_times.extend(times)
+            idx += 1
+        else:
+            # Only one country, use index 0
+            country_code, df = next(iter(self.data.items()))
             features, targets, times = self._process_country_data(df, country_code)
-            country_code_int = idx
+            country_code_int = self.one_country_idx
             if len(features) > 0:
                 all_features.append(features)
                 all_targets.append(targets)
                 all_countries.extend([country_code_int] * len(features))
                 all_times.extend(times)
-            idx += 1
 
         if not all_features:
             raise ValueError("No valid samples found in dataset")
@@ -132,7 +146,7 @@ class CountryTimeSeriesDataset(Dataset):
     def _process_country_data(self, df: pd.DataFrame, country_code: str) -> Tuple[np.ndarray, np.ndarray, List]:
         """Process data for a single country."""
         # Determine feature columns
-        feature_cols = [self.target_col]#f"{self.target_col}_untransformed"]
+        feature_cols = [f"{self.target_col}"] #"{self.target_col}_untransformed"] #
         target_cols = []
         horizon_target_cols = [f"{self.target_col}_h{h}_q{q}" for h in self.horizons for q in self.quantiles]
 

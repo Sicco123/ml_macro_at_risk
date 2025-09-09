@@ -73,10 +73,12 @@ class AR_per_country(nn.Module):
         self.intercepts = intercepts
         self.phis = phis
 
+        phi_average = phis.mean()
+
         self.quantiles = quantiles
         self.horizons = horizons
 
-        self.phi_tensors = nn.Parameter(torch.tensor(phis, dtype=torch.float32), requires_grad=True)
+        self.phi_tensors = nn.Parameter(torch.tensor([phi_average], dtype=torch.float32), requires_grad=True)
         self.intercept_tensors = nn.Parameter(torch.tensor(intercepts, dtype=torch.float32), requires_grad=True)
         
         
@@ -89,7 +91,7 @@ class AR_per_country(nn.Module):
         x_expanded = x.squeeze(-1).unsqueeze(1).unsqueeze(2)  # Shape: (batch_size, 1, 1)
         
         output = (self.intercept_tensors[country_idx] + 
-                self.phi_tensors[country_idx] * x_expanded)
+                self.phi_tensors[0] * x_expanded)
         
         return output
 
@@ -106,6 +108,7 @@ class EnsembleNN(nn.Module):
         activation: ActivationType = "relu",
         intercepts_init = None,
         phis_init =  None,
+        turn_on_neural_net: bool = True
     ):
         """Initialize Ensemble Factor Neural Network.
         
@@ -148,6 +151,7 @@ class EnsembleNN(nn.Module):
 
         #self.ar_models.compile()
 
+        self.turn_on_neural_net = turn_on_neural_net
         #logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
 
@@ -155,16 +159,28 @@ class EnsembleNN(nn.Module):
 
         if per_model_inputs:
             # x[i] is (batch, features), need to extract first feature for AR
-            ensemble = torch.stack([
-                m(x[i,:,:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
-                for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
-            ], dim=0)
+            if self.turn_on_neural_net:
+                ensemble = torch.stack([
+                    m(x[i,:,:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
+                    for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
+                ], dim=0)
+            else:
+                ensemble = torch.stack([
+                    ar_m(x[i, :, 0:1], country_codes[i]) 
+                    for i, ar_m in enumerate(self.ar_models)
+                ], dim=0)
         else:
-            # x is (batch, features), extract first feature for AR  
-            ensemble = torch.stack([
-                m(x[:, :])+ ar_m(x[:, 0:1], country_codes)
-                for m, ar_m in zip(self.models, self.ar_models)
-            ], dim=0)
+            if self.turn_on_neural_net:
+                # x is (batch, features), extract first feature for AR  
+                ensemble = torch.stack([
+                    m(x[:,:]) + ar_m(x[:, 0:1], country_codes) 
+                    for m, ar_m in zip(self.models, self.ar_models)
+                ], dim=0)
+            else:
+                ensemble = torch.stack([
+                    ar_m(x[:, 0:1], country_codes) 
+                    for ar_m in self.ar_models
+                ], dim=0)
         
         return ensemble if return_ensemble else ensemble.mean(dim=0)
 

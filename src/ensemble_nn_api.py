@@ -15,7 +15,7 @@ from .ensembleNN.dataset import CountryTimeSeriesDataset, create_data_loaders
 from .ensembleNN.model import EnsembleNN
 from .ensembleNN.training import EnsembleNNTrainer
 from .ensembleNN import utils as ensembleNN_utils
-
+from .lqr.model import QuantileRegressor
 
 from .utils import (
     create_lagged_features,
@@ -41,7 +41,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         prefit_AR: Optional[bool] = True, 
         country_ids: Optional[List[str]] = None, 
         time_col: str = "TIME",
-        verbose: int = 1  # Added missing verbose parameter
+        turn_on_neural_net: bool = True,
+        verbose: int = 1
     ) -> None:
         
         # Set random seed
@@ -58,7 +59,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         self.seed = seed
         self.time_col = time_col
         self.verbose = verbose  # Store verbose parameter
-        
+        self.turn_on_neural_net = turn_on_neural_net
+
         if transform:
             self.transformations = {}
         if prefit_AR:
@@ -91,7 +93,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         targets = []
 
         for i, df in enumerate(data_list):
-            pred, target = self.predict_per_country(df, self.country_ids[i])  # Fixed method name
+            pred, target = self.predict_per_country(df, self.country_ids[i], i)  # Fixed method name
             predictions.append(pred)
             targets.append(target)
         # stack in the first dimension
@@ -99,9 +101,10 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         targets = np.stack(targets, axis=0)  # Shape (N, H)
         return predictions, targets
     
-    def predict_per_country(self, df, country_id):
+    def predict_per_country(self, df, country_id, country_idx):
         # Convert to country dictionary
         pred_country_data = {}
+  
   
         pred_country_data[country_id] = df.copy()
     
@@ -142,8 +145,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 else:
                     logger.warning(f"No transformations found for country {country}. Using raw data.")
                     # Even when no transformations, create the untransformed column that dataset expects
-                    # if self.target in df.columns:
-                    #     pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
+                    if self.target in df.columns:
+                        pred_target_data[country][f"{self.target}_untransformed"] = df[self.target].copy()
         else:
             # No transformations available - create untransformed columns for all countries
             for country, df in pred_target_data.items():
@@ -153,11 +156,11 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
      
         pred_target_data = self._per_quantile_per_horizon_targets(pred_target_data)
-        
+
         
         # Create dataset and data loader
         pred_dataset = CountryTimeSeriesDataset(
-            pred_target_data, self.target, self.quantiles, self.forecast_horizons, self.lags
+            pred_target_data, self.target, self.quantiles, self.forecast_horizons, self.lags, one_country_idx=country_idx
         )
         
         pred_loader = torch.utils.data.DataLoader(
@@ -204,10 +207,13 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
 
 
+        
         self._pretransform()
         intercepts, phis = self._get_AR_terms()
         self.intercepts = intercepts 
         self.phis = phis 
+
+
 
 
         train_loaders, val_loaders = create_data_loaders(
@@ -232,7 +238,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             n_models=parallel_models,
             activation=self.activation, 
             intercepts_init=intercepts,
-            phis_init=phis
+            phis_init=phis,
+            turn_on_neural_net=self.turn_on_neural_net
         )
 
         self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
@@ -289,7 +296,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
                 #logger.info("Training completed.")
                 a = 0
                 pass
-        
+
         return results
 
     def save_model(self, path: Union[str, Path]) -> None:
@@ -414,8 +421,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         
             for q_idx, q in enumerate(self.quantiles):  # Use enumerate to get proper index
                 for h_idx, h in enumerate(self.forecast_horizons):  # Use enumerate for horizons too
-                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].params.iloc[0]
-                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].params.iloc[1]
+                    intercepts[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].intercept_
+                    phis[idx, q_idx, h_idx] = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].coef_[0]
 
             idx += 1
 
@@ -471,7 +478,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         return out
         
 
-    def _fit_AR_models(self, df: pd.DataFrame, country) -> Dict[str, Dict[float, Dict[str, sm.regression.quantile_regression.QuantRegResults]]]:
+    def _fit_AR_models(self, df: pd.DataFrame, country) -> Dict[str, Dict[float, Dict[str, QuantileRegressor]]]:
         
          # get ar data before transformation
 
@@ -481,15 +488,14 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         for q in self.quantiles:
             hor_models = {}
             for h in self.forecast_horizons:
-                X = df[self.target]
-                y = df[f"{self.target}_h{h}_q{q}"]
-                X = sm.add_constant(X)  # Add constant term for intercept
-                # linear quantile regression from X on y 
-                # set seed 
-                np.random.seed(42)
-                model = sm.QuantReg(y, X)
-                fitted_model = model.fit(q=q)
-                hor_models[f"{self.target}_h{h}_q{q}"] = fitted_model
+                X = df[self.target].values.reshape(-1, 1)  # Convert to 2D array
+                y = df[f"{self.target}_h{h}_q{q}"].values
+              
+                # Use LQR with alpha=0.0 for exact quantile regression
+                model = QuantileRegressor(quantile=q, alpha=0.0, fit_intercept=True)
+                model.fit(X, y)
+                
+                hor_models[f"{self.target}_h{h}_q{q}"] = model
 
             q_models[q] = hor_models
         self.ar_models[country] = q_models
@@ -500,8 +506,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
         for q in self.quantiles:
             for h in self.forecast_horizons:
-                X = sm.add_constant(df[self.target])
-                df[f'{h}_q{q}'] = df[h] - self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].predict(X)
+                X = df[self.target].values.reshape(-1, 1)  # Use LQR format
+                y_pred = self.ar_models[country][q][f"{self.target}_h{h}_q{q}"].predict(X)
+                df[f'{h}_q{q}'] = df[h] - y_pred
         # remove horizon targets from df
         for q in self.quantiles:
             for h in self.forecast_horizons:
@@ -514,9 +521,9 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         for qdx, q in enumerate(self.quantiles):
             for hdx, h in enumerate(self.forecast_horizons):
                 model_name = f"{self.target}_h{h}_q{q}"
-
-                X = sm.add_constant(pred_target_data[self.target])
-
+                
+                X = pred_target_data[self.target].values.reshape(-1, 1)  # Use LQR format
+                
                 predictions[:, qdx, hdx] += self.ar_models[country][q][model_name].predict(X)
 
         return predictions
@@ -552,7 +559,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             n_models=self.parallel_models,
             activation=self.activation, 
             intercepts_init=intercepts,
-            phis_init=phis
+            phis_init=phis,
+            turn_on_neural_net=self.turn_on_neural_net
         )
 
         # load params with torch
