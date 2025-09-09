@@ -328,7 +328,7 @@ class EnsembleNNTrainer:
         Returns:
             Training history
         """
-
+        print(f"Training on device: {self.device}")
        
 
         optimizer = self._get_optimizer(optimizer_type, learning_rate, l2)
@@ -410,9 +410,9 @@ class EnsembleNNTrainer:
             for features, targets, country_codes in data_loader:
                 features = features.to(self.device)
                 country_codes = country_codes.to(self.device)
-
+                
                 predictions = self.model(features, country_codes, return_ensemble=False, per_model_inputs=False)
-
+                
                 all_predictions.append(predictions.cpu().numpy())
                 all_targets.append(targets.cpu().numpy())
         

@@ -1202,7 +1202,8 @@ def _build_nn(
         transform=True,
         prefit_AR=bool(nn_params.get("prefit_AR", True)),
         time_col="TIME",
-        verbose=0
+        verbose=0,
+        turn_on_neural_net=nn_params.get("turn_on_neural_net", True)
     )
 
     epochs = int(nn_params.get("epochs", 100))
@@ -1296,7 +1297,8 @@ def _load_nn_global(
         prefit_AR=bool(nn_params.get("prefit_AR", True)),  # Enable for global models
         country_ids=country_names,  # Pass country names for global model
         time_col="TIME",
-        verbose=0
+        verbose=0,
+        turn_on_neural_net=nn_params.get("turn_on_neural_net", True)
     )
 
     mdl.load_model(model_path)

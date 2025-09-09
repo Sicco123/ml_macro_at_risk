@@ -2,7 +2,7 @@ seed: 123
 
 data:
   path: processed_per_country
-  target: sts_inpr_m_B-D  
+  target: prc_hicp_manr_CP00   
   required_columns: []
   lags: []
   horizons: [1]
@@ -12,7 +12,7 @@ data:
   scale_target: false
   frequency: infer                  # assert equal spacing
   trimming: false
-  old: prc_hicp_manr_CP00
+  old: prc_hicp_manr_CP00, sts_inpr_m_B-D  
 
 splits:
   validation_size: 0.3             # fraction of each country's data for validation
@@ -33,10 +33,11 @@ ensemble_nn:
   device: auto   
   country_dummies: false                   # cuda if available
   l2_penalty: 0.0 
+  turn_on_neural_net: false
 
 lqr:
   alphas: [ 80]
-  solver: huberized
+  solver: pinball
   rff_features: 1000
   rolling: false
 
