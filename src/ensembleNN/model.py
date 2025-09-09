@@ -138,7 +138,7 @@ class EnsembleNN(nn.Module):
         
 
         # compile models
-        self.models.compile()
+        #self.models.compile()
            
 
         self.ar_models = nn.ModuleList([
@@ -146,7 +146,7 @@ class EnsembleNN(nn.Module):
             for _ in range(n_models)
         ])
 
-        self.ar_models.compile()
+        #self.ar_models.compile()
 
         #logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
@@ -156,13 +156,13 @@ class EnsembleNN(nn.Module):
         if per_model_inputs:
             # x[i] is (batch, features), need to extract first feature for AR
             ensemble = torch.stack([
-                m(x[i,:,:]) + 0*ar_m(x[i, :, 0:1], country_codes[i]) 
+                m(x[i,:,:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
                 for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
             ], dim=0)
         else:
             # x is (batch, features), extract first feature for AR  
             ensemble = torch.stack([
-                m(x[:, :])+ 0*ar_m(x[:, 0:1], country_codes)
+                m(x[:, :])+ ar_m(x[:, 0:1], country_codes)
                 for m, ar_m in zip(self.models, self.ar_models)
             ], dim=0)
         

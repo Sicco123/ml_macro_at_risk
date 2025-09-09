@@ -300,7 +300,7 @@ class EnsembleNNTrainer:
         baseline_output_mean = all_baseline_residuals.mean(axis=0)
 
         return baseline_output_mean, baseline_output_sd
-    @torch.compile
+    #@torch.compile
     def fit(
         self,
         train_loaders: List[DataLoader],

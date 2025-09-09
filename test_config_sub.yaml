@@ -70,7 +70,7 @@ models:
     enabled: true
     per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
-      - name: v1
+      - name: ar-v1
         params:
           units_per_layer: [32, 32, 32, 32, 32]
           activation: relu
