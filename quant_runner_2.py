@@ -2113,7 +2113,7 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
         
         
         # Show memory usage and task statistics periodically
-        if (completed + failed) % 100 == 0:
+        if (completed + failed) % 1 == 0:
             try:
                 process = psutil.Process()
                 memory_mb = process.memory_info().rss / 1024 / 1024

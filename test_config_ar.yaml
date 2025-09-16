@@ -21,7 +21,7 @@ rolling_window:
   end: auto                            # 'auto' => last available date
 
 splits:
-  test_cutoff: "2016-01-01"            # if rolling_window.start == auto
+  test_cutoff: "2015-12-01"            # if rolling_window.start == auto
   min_train_points: 24                 # minimum obs required to train
 
 runtime:
@@ -49,7 +49,7 @@ models:
   - type: ar-qr
     enabled: true
     versions:
-      - name: T141
+      - name: T142
         params:
           solver: pinball
           alphas: [0.0]
@@ -59,7 +59,7 @@ models:
   - type: lqr
     enabled: true
     versions:
-      - name: T141
+      - name: T142
         params:
           solver: pinball
           alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
