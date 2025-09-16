@@ -1,7 +1,7 @@
 """Dataset and data loading utilities for Factor Neural Networks."""
 
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Tuple, Optional
@@ -75,6 +75,7 @@ class CountryTimeSeriesDataset(Dataset):
                 all_targets.append(targets)
                 all_countries.extend([country_code_int] * len(features))
                 all_times.extend(times)
+                all_times.extend(times)
 
         if not all_features:
             raise ValueError("No valid samples found in dataset")
@@ -100,7 +101,6 @@ class CountryTimeSeriesDataset(Dataset):
         logger.debug(f"After vstack - features dtype: {self.features.dtype}, targets dtype: {self.targets.dtype}")
 
         self.countries = np.array(all_countries).reshape(-1, 1, 1)
-
         self.times = all_times
 
 
@@ -194,47 +194,6 @@ class CountryTimeSeriesDataset(Dataset):
             Tuple of (features, targets) where targets shape is (H,) for H horizons
         """
         try:
-            # # Get data
-            # features_data = self.features[idx]
-            # targets_data = self.targets[idx]
-            # country_codes = self.countries[idx]
-            
-            # # Robust conversion to float64 - multiple fallback strategies
-            # def safe_convert_to_float64(data, name, idx):
-            #     """Safely convert data to float64 with multiple fallback strategies."""
-            #     if isinstance(data, np.ndarray) and data.dtype == np.float64:
-            #         return data
-                
-            #     # Strategy 1: Direct astype conversion
-            #     try:
-            #         return np.array(data, dtype=np.float64)
-            #     except (ValueError, TypeError):
-            #         pass
-                
-            #     # Strategy 2: Element-wise conversion
-            #     try:
-            #         if data.ndim == 1:
-            #             return np.array([float(x) if pd.notna(x) and x is not None else 0.0 for x in data], dtype=np.float64)
-            #         else:
-            #             return np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in data], dtype=np.float64)
-            #     except (ValueError, TypeError):
-            #         pass
-                
-            #     # Strategy 3: Last resort - create zeros with same shape
-            #     logger.error(f"All conversion strategies failed for {name} at index {idx}, creating zeros")
-            #     if hasattr(data, 'shape'):
-            #         return np.zeros(data.shape, dtype=np.float64)
-            #     else:
-            #         return np.zeros(len(data) if hasattr(data, '__len__') else 1, dtype=np.float64)
-            
-            # features_data = safe_convert_to_float64(features_data, "features", idx)
-            # targets_data = safe_convert_to_float64(targets_data, "targets", idx)
-            
-            # # Convert to tensors
-            # features = torch.FloatTensor(features_data)
-            # targets = torch.FloatTensor(targets_data)
-            # country_codes = torch.IntTensor(country_codes)
-            # return features, targets, country_codes
             # Avoid intermediate numpy arrays
             features = torch.from_numpy(self.features[idx]).float()
             targets = torch.from_numpy(self.targets[idx]).float()
@@ -278,90 +237,69 @@ def create_data_loaders(
     batch_size: int = 256,
     shuffle: bool = True,
     num_workers: int = 0,
-    seed: Optional[int] = None,
+    seed: Optional[int] = 42,
     val_size: Optional[float] = None,
 ) -> Tuple[List[DataLoader], Optional[List[DataLoader]]]:
-    """Create train and validation data loaders.
-    
-    Args:
-        data: Training data by country
-        ensemble_size: Number of ensemble members
-        target_col: Name of target column
-        quantiles: List of quantile levels
-        horizons: List of forecast horizons
-        lags: List of lag periods
-        batch_size: Batch size
-        shuffle: Whether to shuffle training data
-        num_workers: Number of data loader workers
-        seed: Random seed for data loading
-        val_size: Fraction of data to use for validation
-        
-    Returns:
-        Tuple of (train_loaders, val_loaders)
-    """
+    """Create train and validation data loaders."""
     train_loaders = []
     val_loaders = []
     
-    for idx in range(ensemble_size):
-        train_data = {}
-        val_data = None
-        
-        if val_size is not None:
-            # Split data into train and validation sets
-            for country, df in data.items():
-                n_val = int(len(df) * val_size)
-                if shuffle:
-                    df = df.sample(frac=1, random_state=seed+idx if seed else None).reset_index(drop=True)
-                if n_val > 0:
-                    train_data[country] = df[:-n_val]
-                    if val_data is None:
-                        val_data = {}
-                    val_data[country] = df[-n_val:]
-                else:
-                    train_data[country] = df
-            
-            if val_data is None:
-                logger.warning("Validation size is too small, no validation set created")
-        else:
-            train_data = data
-        
-
-        train_dataset = CountryTimeSeriesDataset(
-            train_data, target_col, quantiles, horizons, lags
-        )
-
-
-        val_dataset = None
-        if val_data is not None:
-            val_dataset = CountryTimeSeriesDataset(
-                val_data, target_col, quantiles, horizons, lags
-            )
-
+    # Create single base dataset instead of one per ensemble member
+    base_dataset = CountryTimeSeriesDataset(
+        data, target_col, quantiles, horizons, lags
+    )
     
-        # Create data loaders
+    for idx in range(ensemble_size):
         generator = None
         if seed is not None:
             generator = torch.Generator()
-            generator.manual_seed(seed + idx)  # Ensure different seed for each ensemble member
+            generator.manual_seed(seed + idx)
         
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            generator=generator,
-            pin_memory=torch.cuda.is_available()
-        )
-        
-        val_loader = None
-        if val_dataset is not None:
+        if val_size is not None:
+            # Use subset to split without duplicating data
+            dataset_size = len(base_dataset)
+            val_split = int(dataset_size * val_size)
+            train_split = dataset_size - val_split
+            
+            if shuffle and seed is not None:
+                indices = np.arange(dataset_size)
+                np.random.seed(seed + idx)
+                np.random.shuffle(indices)
+                train_indices = indices[:train_split]
+                val_indices = indices[train_split:]
+            else:
+                train_indices = range(train_split)
+                val_indices = range(train_split, dataset_size)
+
+            train_subset = Subset(base_dataset, train_indices)
+            val_subset = Subset(base_dataset, val_indices)
+
+            train_loader = DataLoader(
+                train_subset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                generator=generator,
+                pin_memory=torch.cuda.is_available()
+            )
+            
             val_loader = DataLoader(
-                val_dataset,
+                val_subset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
                 pin_memory=torch.cuda.is_available()
             )
+        else:
+            train_loader = DataLoader(
+                base_dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                generator=generator,
+                pin_memory=torch.cuda.is_available()
+            )
+            val_loader = None
 
         train_loaders.append(train_loader)
         val_loaders.append(val_loader)

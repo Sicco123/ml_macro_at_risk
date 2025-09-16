@@ -1,87 +1,272 @@
-# ...existing code...
+"""Dataset and data loading utilities for Factor Neural Networks."""
+
 import torch
-from torch.utils.data import Dataset, DataLoader
-# Add Subset
-from torch.utils.data import Subset
-# ...existing code...
+from torch.utils.data import Dataset, DataLoader, Subset
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Tuple, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 class CountryTimeSeriesDataset(Dataset):
-    # ...existing code...
+    """Dataset for multi-country time series data with lagged features."""
+    
+    def __init__(
+        self,
+        data: Dict[str, pd.DataFrame],
+        target_col: str,
+        quantiles: List[float],
+        horizons: List[int],
+        lags: List[int] = [1],
+        time_col: str = "TIME",
+        exclude_contemp_target: bool = False, 
+        one_country_idx: Optional[int] = 0,
+    ):
+        """Initialize dataset.
+        
+        Args:
+            data: Dictionary of country DataFrames
+            target_col: Name of target column
+            horizons: List of forecast horizons
+            lags: List of lag periods
+            time_col: Name of time column
+            exclude_contemp_target: Whether to exclude contemporaneous target from features
+        """
+        self.data = data
+        self.target_col = target_col
+        self.quantiles = quantiles
+        self.horizons = horizons
+        self.lags = lags
+        self.time_col = time_col
+        self.exclude_contemp_target = exclude_contemp_target
+        self.one_country_idx = one_country_idx  # If only one country, use this index
+        
+        # Build feature matrix and targets
+        self._build_dataset()
+    
     def _build_dataset(self):
         """Build the dataset tensors."""
         all_features = []
         all_targets = []
         all_countries = []
         all_times = []
-        # Keep a mapping so we can split per country efficiently later
-        self.country_to_id = {}
 
+        # if len self.data.items() > 1
         if len(self.data.items()) > 1:
-            # Fix: ensure we increment country id per country
-            for idx, (country_code, df) in enumerate(self.data.items()):
-                self.country_to_id[country_code] = idx
+            idx = 0
+            for country_code, df in self.data.items():
                 features, targets, times = self._process_country_data(df, country_code)
+                country_code_int = idx
                 if len(features) > 0:
-                    # store as float32 to reduce memory (you cast to torch.float later anyway)
-                    all_features.append(features.astype(np.float32, copy=False))
-                    all_targets.append(targets.astype(np.float32, copy=False))
-                    all_countries.extend([idx] * len(features))
+                    all_features.append(features)
+                    all_targets.append(targets)
+                    all_countries.extend([country_code_int] * len(features))
                     all_times.extend(times)
+            idx += 1
         else:
+            # Only one country, use index 0
             country_code, df = next(iter(self.data.items()))
-            self.country_to_id[country_code] = 0
             features, targets, times = self._process_country_data(df, country_code)
+            country_code_int = self.one_country_idx
             if len(features) > 0:
-                all_features.append(features.astype(np.float32, copy=False))
-                all_targets.append(targets.astype(np.float32, copy=False))
-                all_countries.extend([0] * len(features))
+                all_features.append(features)
+                all_targets.append(targets)
+                all_countries.extend([country_code_int] * len(features))
                 all_times.extend(times)
 
         if not all_features:
             raise ValueError("No valid samples found in dataset")
+        
+        # Debug: Check dtypes before stacking
+        logger.debug(f"About to stack {len(all_features)} feature arrays")
+        for i, feat in enumerate(all_features):
+            logger.debug(f"Feature array {i} dtype: {feat.dtype}, shape: {feat.shape}")
+            # Force all arrays to be float32 before stacking
+            if feat.dtype != np.float32:
+                logger.warning(f"Converting feature array {i} from {feat.dtype} to float32")
+                all_features[i] = feat.astype(np.float32)
+        
 
-        # Concatenate all countries
-        self.features = np.vstack(all_features).astype(np.float32, copy=False)
-        self.targets = np.vstack(all_targets).astype(np.float32, copy=False)
+        # Concatenate all countries - use float32
+        self.features = np.vstack(all_features).astype(np.float32)
+        self.targets = np.vstack(all_targets).astype(np.float32)
+
         del all_features
         del all_targets
+        
+        # Debug: Check dtype right after stacking
+        logger.debug(f"After vstack - features dtype: {self.features.dtype}, targets dtype: {self.targets.dtype}")
 
-        # Keep countries as a compact 1D int array
-        self.countries = np.asarray(all_countries, dtype=np.int32)
+        self.countries = np.array(all_countries).reshape(-1, 1, 1)
+
         self.times = all_times
 
-        # Handle rare object dtype edge cases (kept minimal, but now to float32)
+
+
+        # Ensure features and targets are proper numeric arrays with float32
         if self.features.dtype == object:
+            logger.error("Features array has object dtype after vstack, forcing conversion")
             try:
+                # First attempt: direct conversion to float32
                 self.features = self.features.astype(np.float32)
-            except (ValueError, TypeError):
-                self.features = np.array(
-                    [[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.features],
-                    dtype=np.float32
-                )
-
+            except (ValueError, TypeError) as e:
+                logger.error(f"Direct conversion failed: {e}")
+                try:
+                    # Second attempt: element-wise conversion
+                    logger.warning("Attempting element-wise conversion")
+                    self.features = np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.features], dtype=np.float32)
+                except (ValueError, TypeError) as e2:
+                    logger.error(f"Element-wise conversion failed: {e2}")
+                    # Last resort: create zeros array with correct shape
+                    logger.error("Creating zeros array as last resort")
+                    self.features = np.zeros(self.features.shape, dtype=np.float32)
+        
         if self.targets.dtype == object:
+            logger.error("Targets array has object dtype after vstack, forcing conversion")
             try:
+                # First attempt: direct conversion to float32
                 self.targets = self.targets.astype(np.float32)
-            except (ValueError, TypeError):
-                self.targets = np.array(
-                    [[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.targets],
-                    dtype=np.float32
-                )
-    # ...existing code...
+            except (ValueError, TypeError) as e:
+                logger.error(f"Direct conversion failed: {e}")
+                try:
+                    # Second attempt: element-wise conversion
+                    logger.warning("Attempting element-wise conversion")
+                    self.targets = np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.targets], dtype=np.float32)
+                except (ValueError, TypeError) as e2:
+                    logger.error(f"Element-wise conversion failed: {e2}")
+                    # Last resort: create zeros array with correct shape
+                    logger.error("Creating zeros array as last resort")
+                    self.targets = np.zeros(self.targets.shape, dtype=np.float32)
 
+        #logger.info(f"Dataset built: {len(self.features)} samples, {self.features.shape[1]} features")
+        #logger.info(f"Features dtype: {self.features.dtype}, Targets dtype: {self.targets.dtype}")
+    
+    def _process_country_data(self, df: pd.DataFrame, country_code: str) -> Tuple[np.ndarray, np.ndarray, List]:
+        """Process data for a single country."""
+        # Determine feature columns
+        feature_cols = [f"{self.target_col}"] #"{self.target_col}_untransformed"] #
+        target_cols = []
+        horizon_target_cols = [f"{self.target_col}_h{h}_q{q}" for h in self.horizons for q in self.quantiles]
+
+        for col in df.columns:
+            if col == self.time_col or col == f"{self.target_col}_untransformed" or col == self.target_col:
+               
+                continue
+            # if {target_col}_h{horizon} = col continue 
+            if col in horizon_target_cols:
+          
+                continue
+
+            feature_cols.append(col)
+
+        for q in self.quantiles:
+            per_quantile = []
+            for h in self.horizons:
+                per_quantile.append(f"{self.target_col}_h{h}_q{q}")
+            target_cols.append(per_quantile)
+            
+        feature_data_array = df[feature_cols].values.astype(np.float32)
+        
+        target_data_array = np.zeros((len(df), len(self.quantiles), len(self.horizons)), dtype=np.float32)
+        for i, q in enumerate(self.quantiles):
+            for j, h in enumerate(self.horizons):
+                target_col_name = f"{self.target_col}_h{h}_q{q}"
+                target_data_array[:, i, j] = df[target_col_name].values.astype(np.float32)
+
+        
+        
+        # Extract times
+        times = df[self.time_col].tolist()
+
+
+
+        return feature_data_array, target_data_array, times
+    
+    def __len__(self) -> int:
+        return len(self.features)
+    
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        # ...existing code...
+        """Get a single sample.
+        
+        Returns:
+            Tuple of (features, targets) where targets shape is (H,) for H horizons
+        """
         try:
+            # # Get data
+            # features_data = self.features[idx]
+            # targets_data = self.targets[idx]
+            # country_codes = self.countries[idx]
+            
+            # # Robust conversion to float32 - multiple fallback strategies
+            # def safe_convert_to_float32(data, name, idx):
+            #     """Safely convert data to float32 with multiple fallback strategies."""
+            #     if isinstance(data, np.ndarray) and data.dtype == np.float32:
+            #         return data
+                
+            #     # Strategy 1: Direct astype conversion
+            #     try:
+            #         return np.array(data, dtype=np.float32)
+            #     except (ValueError, TypeError):
+            #         pass
+                
+            #     # Strategy 2: Element-wise conversion
+            #     try:
+            #         if data.ndim == 1:
+            #             return np.array([float(x) if pd.notna(x) and x is not None else 0.0 for x in data], dtype=np.float32)
+            #         else:
+            #             return np.array([[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in data], dtype=np.float32)
+            #     except (ValueError, TypeError):
+            #         pass
+                
+            #     # Strategy 3: Last resort - create zeros with same shape
+            #     logger.error(f"All conversion strategies failed for {name} at index {idx}, creating zeros")
+            #     if hasattr(data, 'shape'):
+            #         return np.zeros(data.shape, dtype=np.float32)
+            #     else:
+            #         return np.zeros(len(data) if hasattr(data, '__len__') else 1, dtype=np.float32)
+            
+            # features_data = safe_convert_to_float32(features_data, "features", idx)
+            # targets_data = safe_convert_to_float32(targets_data, "targets", idx)
+            
+            # # Convert to tensors
+            # features = torch.FloatTensor(features_data)
+            # targets = torch.FloatTensor(targets_data)
+            # country_codes = torch.IntTensor(country_codes)
+            # return features, targets, country_codes
+            # Avoid intermediate numpy arrays
             features = torch.from_numpy(self.features[idx]).float()
             targets = torch.from_numpy(self.targets[idx]).float()
-            # countries is 1D; return a small 1x1 tensor to preserve previous shape expectations
-            country_codes = torch.tensor([[int(self.countries[idx])]], dtype=torch.int32)
+            country_codes = torch.from_numpy(self.countries[idx]).int()
+            
             return features, targets, country_codes
+
         except Exception as e:
-            # ...existing code...
+            logger.error(f"Complete failure converting sample {idx} to tensor: {e}")
+            logger.error(f"Sample country: {self.countries[idx] if idx < len(self.countries) else 'Unknown'}")
+            logger.error(f"Sample time: {self.times[idx] if idx < len(self.times) else 'Unknown'}")
+            
+            # Last resort: return zero tensors with correct shapes
+            feature_dim = self.features.shape[1] if hasattr(self.features, 'shape') and len(self.features.shape) > 1 else 10
+            target_dim = self.targets.shape[1] if hasattr(self.targets, 'shape') and len(self.targets.shape) > 1 else len(self.horizons)
+            
+            logger.error(f"Returning zero tensors: features({feature_dim},), targets({target_dim},)")
             return torch.zeros(feature_dim), torch.zeros(target_dim)
-# ...existing code...
+    
+    def get_feature_dim(self) -> int:
+        """Get the feature dimension."""
+        return self.features.shape[1]
+    
+    def get_sample_info(self, idx: int) -> Dict[str, any]:
+        """Get metadata for a sample."""
+        return {
+            'country': self.countries[idx],
+            'time': self.times[idx],
+            'features': self.features[idx],
+            'targets': self.targets[idx]
+        }
+
 
 def create_data_loaders(
     data: Dict[str, pd.DataFrame],
@@ -96,96 +281,171 @@ def create_data_loaders(
     seed: Optional[int] = None,
     val_size: Optional[float] = None,
 ) -> Tuple[List[DataLoader], Optional[List[DataLoader]]]:
-    """Create train and validation data loaders efficiently by building the dataset once
-    and using index subsets per ensemble split."""
-    train_loaders: List[DataLoader] = []
-    val_loaders: List[Optional[DataLoader]] = []
-
-    # Build a single base dataset (big memory win)
-    base_dataset = CountryTimeSeriesDataset(
+    """Create train and validation data loaders using Subset for memory efficiency.
+    
+    Args:
+        data: Training data by country
+        ensemble_size: Number of ensemble members
+        target_col: Name of target column
+        quantiles: List of quantile levels
+        horizons: List of forecast horizons
+        lags: List of lag periods
+        batch_size: Batch size
+        shuffle: Whether to shuffle training data
+        num_workers: Number of data loader workers
+        seed: Random seed for data loading
+        val_size: Fraction of data to use for validation
+        
+    Returns:
+        Tuple of (train_loaders, val_loaders)
+    """
+    # Create the full dataset once
+    logger.info("Creating full dataset...")
+    full_dataset = CountryTimeSeriesDataset(
         data, target_col, quantiles, horizons, lags
     )
-
-    # Helper: per-country indices on the base dataset
-    # countries stored as ints; we need mapping from country str -> int id
-    country_to_id = getattr(base_dataset, "country_to_id", None)
-    if country_to_id is None:
-        raise RuntimeError("Country mapping missing on dataset")
-
-    # Precompute indices per country (views over one big arrays, no copies)
-    per_country_indices = {}
-    countries_1d = base_dataset.countries  # shape (N,)
-    for country_str, cid in country_to_id.items():
-        per_country_indices[country_str] = np.where(countries_1d == cid)[0]
-
-    use_cuda = torch.cuda.is_available()
-
-    for i in range(ensemble_size):
-        gen = None
-        if seed is not None:
-            gen = torch.Generator()
-            gen.manual_seed(seed + i)
-
-        if val_size is not None and val_size > 0.0:
-            train_idx_all = []
-            val_idx_all = []
-            # Split per country to mirror the previous behavior
-            for country_str, idx_arr in per_country_indices.items():
-                n = len(idx_arr)
-                n_val = int(n * val_size)
-                if n_val <= 0:
-                    train_idx_all.append(idx_arr)
-                    continue
-
+    
+    total_samples = len(full_dataset)
+    logger.info(f"Full dataset created with {total_samples} samples")
+    
+    train_loaders = []
+    val_loaders = []
+    
+    # Set up random number generator for reproducible splits
+    base_rng = np.random.RandomState(seed) if seed is not None else np.random.RandomState()
+    
+    for idx in range(ensemble_size):
+        # Create different random splits for each ensemble member, but ensure reproducibility
+        current_seed = seed + idx if seed is not None else None
+        ensemble_rng = np.random.RandomState(current_seed)
+        
+        # Create data splits that match the original logic exactly
+        train_data = {}
+        val_data = None
+        
+        if val_size is not None:
+            # Split data into train and validation sets (matching original logic)
+            for country, df in data.items():
+                n_val = int(len(df) * val_size)
                 if shuffle:
-                    # Use torch.randperm with generator for reproducibility per ensemble
-                    perm = torch.randperm(n, generator=gen).numpy()
-                    idx_perm = idx_arr[perm]
+                    df_shuffled = df.sample(frac=1, random_state=current_seed).reset_index(drop=True)
                 else:
-                    idx_perm = idx_arr  # keep order
-
-                train_idx_all.append(idx_perm[:-n_val])
-                val_idx_all.append(idx_perm[-n_val:])
-
-            # Concatenate per-country splits
-            train_indices = np.concatenate(train_idx_all) if len(train_idx_all) else np.array([], dtype=np.int64)
-            val_indices = np.concatenate(val_idx_all) if len(val_idx_all) else np.array([], dtype=np.int64)
-
-            train_subset = Subset(base_dataset, train_indices.tolist())
-            val_subset = Subset(base_dataset, val_indices.tolist())
-
-            train_loader = DataLoader(
-                train_subset,
-                batch_size=batch_size,
-                shuffle=shuffle,          # shuffle within the subset each epoch
-                num_workers=num_workers,
-                generator=gen,
-                pin_memory=use_cuda,
-                persistent_workers=(num_workers > 0),
+                    df_shuffled = df
+                    
+                if n_val > 0:
+                    train_data[country] = df_shuffled[:-n_val]
+                    if val_data is None:
+                        val_data = {}
+                    val_data[country] = df_shuffled[-n_val:]
+                else:
+                    train_data[country] = df_shuffled
+            
+            if val_data is None:
+                logger.warning("Validation size is too small, no validation set created")
+        else:
+            train_data = data
+        
+        # Now we need to find the indices in the full dataset that correspond to our train/val splits
+        # We'll create temporary datasets to get the sample indices
+        train_dataset_temp = CountryTimeSeriesDataset(
+            train_data, target_col, quantiles, horizons, lags
+        )
+        
+        # Find matching indices in the full dataset
+        train_indices = []
+        val_indices = []
+        
+        # For each sample in train dataset, find its index in full dataset
+        for train_idx in range(len(train_dataset_temp)):
+            train_sample_info = train_dataset_temp.get_sample_info(train_idx)
+            train_country = train_sample_info['country']
+            train_time = train_sample_info['time']
+            
+            # Find corresponding index in full dataset
+            for full_idx in range(len(full_dataset)):
+                full_sample_info = full_dataset.get_sample_info(full_idx)
+                if (full_sample_info['country'] == train_country and 
+                    full_sample_info['time'] == train_time):
+                    train_indices.append(full_idx)
+                    break
+        
+        # Same for validation if it exists
+        if val_data is not None:
+            val_dataset_temp = CountryTimeSeriesDataset(
+                val_data, target_col, quantiles, horizons, lags
             )
+            
+            for val_idx in range(len(val_dataset_temp)):
+                val_sample_info = val_dataset_temp.get_sample_info(val_idx)
+                val_country = val_sample_info['country']
+                val_time = val_sample_info['time']
+                
+                # Find corresponding index in full dataset
+                for full_idx in range(len(full_dataset)):
+                    full_sample_info = full_dataset.get_sample_info(full_idx)
+                    if (full_sample_info['country'] == val_country and 
+                        full_sample_info['time'] == val_time):
+                        val_indices.append(full_idx)
+                        break
+        
+        # Create subsets using the found indices
+        train_subset = Subset(full_dataset, train_indices)
+        
+        # Create data loader generator for reproducibility
+        generator = None
+        if seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(seed + idx)
+        
+        # Create train loader
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            generator=generator,
+            pin_memory=torch.cuda.is_available()
+        )
+        train_loaders.append(train_loader)
+        
+        # Create validation loader if needed
+        if val_data is not None and val_indices:
+            val_subset = Subset(full_dataset, val_indices)
             val_loader = DataLoader(
                 val_subset,
                 batch_size=batch_size,
                 shuffle=False,
                 num_workers=num_workers,
-                pin_memory=use_cuda,
-                persistent_workers=(num_workers > 0),
+                pin_memory=torch.cuda.is_available()
             )
+            val_loaders.append(val_loader)
         else:
-            # No validation: just use the whole dataset once
-            train_loader = DataLoader(
-                base_dataset,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                num_workers=num_workers,
-                generator=gen,
-                pin_memory=use_cuda,
-                persistent_workers=(num_workers > 0),
-            )
-            val_loader = None
+            val_loaders.append(None)
+    
+    logger.info(f"Created {ensemble_size} ensemble data loaders using Subset for memory efficiency")
+    return train_loaders, val_loaders if any(v is not None for v in val_loaders) else None
 
-        train_loaders.append(train_loader)
-        val_loaders.append(val_loader)
 
-    return train_loaders, val_loaders
-# ...existing code...
+def get_country_sample_indices(
+    dataset: CountryTimeSeriesDataset,
+    countries: List[str]
+) -> Dict[str, List[int]]:
+    """Get sample indices for specific countries.
+    
+    Args:
+        dataset: Dataset object
+        countries: List of country codes
+        
+    Returns:
+        Dictionary mapping country codes to sample indices
+    """
+    indices = {country: [] for country in countries}
+    
+    for idx, country in enumerate(dataset.countries):
+        if country in indices:
+            indices[country].append(idx)
+    
+    return indices
+
+
+

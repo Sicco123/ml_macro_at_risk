@@ -56,7 +56,7 @@ class LQR:
             lags: List of lag periods
             alpha: L2 regularization strength (elastic-net mixing parameter for hqreg)
             fit_intercept: Whether to fit intercept
-            solver: Solver type ("huberized" for Python, "hqreg" for R-based)
+            solver: Solver type ("pinball" for Python, "hqreg" for R-based)
             seed: Random seed
             gamma: Huber loss tuning parameter (R only, default: IQR(y)/10)
             nlambda: Number of lambda values for regularization path (R only)

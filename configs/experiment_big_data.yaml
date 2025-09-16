@@ -33,7 +33,7 @@ ensemble_nn:
   device: auto   
   country_dummies: false                   # cuda if available
   l2_penalty: 0.0 
-  turn_on_neural_net: false
+  turn_on_neural_net: true
 
 lqr:
   alphas: [ 80]

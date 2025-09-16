@@ -11,7 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-SolverType = Literal["huberized", "linear_programming"]
+SolverType = Literal["linear_programming", "pinball"]
 
 
 def pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
@@ -51,7 +51,7 @@ def pinball_loss(params: np.ndarray, X: np.ndarray, y: np.ndarray,
 
 def pinball_gradient(params: np.ndarray, X: np.ndarray, y: np.ndarray, 
                               quantile: float, alpha: float) -> np.ndarray:
-    """Gradient of huberized pinball loss.
+    """Gradient of pinball loss.
     
     Args:
         params: Model parameters
@@ -232,7 +232,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         quantile: float,
         alpha: float = 1.0,
         fit_intercept: bool = True,
-        solver: SolverType = "huberized",
+        solver: SolverType = "pinball",
         max_iter: int = 1000,
         tol: float = 1e-6
     ):
@@ -273,7 +273,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         
         self.n_features_in_ = X.shape[1]
         
-        if self.solver == "huberized":
+        if self.solver == "pinball":
             self._fit(X, y)
         else:
             raise ValueError(f"Unknown solver: {self.solver}")
@@ -363,7 +363,7 @@ class MultiQuantileRegressor:
         horizons: List[int],
         alpha: float = 1.0,
         fit_intercept: bool = True,
-        solver: SolverType = "huberized"
+        solver: SolverType = "pinball"
     ):
         """Initialize multi-quantile regressor.
         
