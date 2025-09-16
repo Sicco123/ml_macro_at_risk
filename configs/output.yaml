@@ -5,7 +5,7 @@ output:
   base_dir: "analysis_output"
 
 analysis:
-  benchmark_model: "ar-qr_T192"  # Model to use as benchmark for DM tests
+  benchmark_model: "ar-qr_T141"  # Model to use as benchmark for DM tests
   mcs_alpha: 0.1  # Significance level for Model Confidence Set
 
 plots:
@@ -15,3 +15,7 @@ plots:
 covid:
   start_date: "2020-03-01"
   end_date: "2021-12-31"
+
+test_period:
+  start_date: "2016-02-01"
+  end_date: "2025-01-07"

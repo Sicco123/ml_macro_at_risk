@@ -42,6 +42,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         country_ids: Optional[List[str]] = None, 
         time_col: str = "TIME",
         turn_on_neural_net: bool = True,
+        turn_on_ar: bool = True,
         verbose: int = 1
     ) -> None:
         
@@ -60,6 +61,7 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
         self.time_col = time_col
         self.verbose = verbose  # Store verbose parameter
         self.turn_on_neural_net = turn_on_neural_net
+        self.turn_on_ar = turn_on_ar
 
         if transform:
             self.transformations = {}
@@ -215,7 +217,6 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
 
 
 
-
         train_loaders, val_loaders = create_data_loaders(
             self.features_and_targets,
             parallel_models,  # This should be the ensemble size
@@ -239,7 +240,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             activation=self.activation, 
             intercepts_init=intercepts,
             phis_init=phis,
-            turn_on_neural_net=self.turn_on_neural_net
+            turn_on_neural_net=self.turn_on_neural_net,
+            turn_on_ar=self.turn_on_ar
         )
 
         self.trainer = EnsembleNNTrainer(self.model, self.quantiles, self.device)
@@ -560,7 +562,8 @@ class EnsembleNNAPI:  # Changed class name to avoid conflict
             activation=self.activation, 
             intercepts_init=intercepts,
             phis_init=phis,
-            turn_on_neural_net=self.turn_on_neural_net
+            turn_on_neural_net=self.turn_on_neural_net,
+            turn_on_ar=self.turn_on_ar
         )
 
         # load params with torch

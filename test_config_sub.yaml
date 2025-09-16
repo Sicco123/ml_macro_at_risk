@@ -5,7 +5,7 @@
 seed: 123
 
 data:
-  path: processed_per_country          # folder containing one file per country (CSV/Parquet)
+  path: processed_per_country/fast_pickle          # folder containing one file per country (CSV/Parquet)
   time_col: TIME
   country_col: COUNTRY                 # optional; if missing we infer from filename
   target: prc_hicp_manr_CP00
@@ -27,7 +27,7 @@ splits:
 runtime:
   allow_reload: false                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  num_workers: 24                       # hint for how many workers will be working
+  num_workers: 4                       # hint for how many workers will be working
   batch_size: 1                       # INCREASED: number of tasks to claim and process per batch
   max_ram_gb: 30.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
@@ -49,7 +49,7 @@ models:
   - type: ar-qr
     enabled: false
     versions:
-      - name: T192
+      - name: T141
         params:
           solver: huberized
           alphas: [0.0]
@@ -59,7 +59,7 @@ models:
   - type: lqr
     enabled: false
     versions:
-      - name: T192
+      - name: T141
         params:
           solver: huberized
           alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
@@ -67,10 +67,10 @@ models:
           cv_splits: 10
 
   - type: nn
-    enabled: true
+    enabled: false
     per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
-      - name: ar-v1
+      - name: ar-nn-32-32-32-32-32
         params:
           units_per_layer: [32, 32, 32, 32, 32]
           activation: relu
@@ -83,3 +83,25 @@ models:
           device: cpu
           l2_penalty: 0.0
           validation_size: 0.3
+          turn_on_neural_net: true
+          turn_on_ar: true
+
+  - type: nn
+    enabled: true
+    per_country: false  # true = train separate model for each country, false = train global model on all countries
+    versions:
+      - name: penal-ar
+        params:
+          units_per_layer: []
+          activation: relu
+          optimizer: adam
+          learning_rate: 5.0e-5
+          epochs: 1500
+          batch_size: 32
+          patience: 5
+          parallel_models: 10
+          device: cpu
+          l2_penalty: 0.0
+          validation_size: 0.3
+          turn_on_neural_net: false
+          turn_on_ar: true

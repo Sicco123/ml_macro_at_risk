@@ -5,7 +5,7 @@
 seed: 123
 
 data:
-  path: processed_per_country          # folder containing one file per country (CSV/Parquet)
+  path: processed_per_country/fast_pickle          # folder containing one file per country (CSV/Parquet)
   time_col: TIME
   country_col: COUNTRY                 # optional; if missing we infer from filename
   target: prc_hicp_manr_CP00
@@ -15,7 +15,7 @@ data:
   missing: forward_fill_then_mean      # forward fill, then mean imputation
 
 rolling_window:
-  size: 192                             # training window size (in periods)
+  size: 141                             # training window size (in periods)
   step: 1                              # how many periods to advance the window
   start: auto                          # 'auto' => use splits.test_cutoff
   end: auto                            # 'auto' => last available date

@@ -48,7 +48,7 @@ import pandas as pd
 import joblib
 from filelock import FileLock
 from tqdm import tqdm
-import pyarrow.parquet as pq
+
 
 # Global model cache for sharing trained models across countries in the same window
 _global_model_cache = {}
@@ -883,13 +883,15 @@ class SQLiteTaskCoordinator:
                                 instance_id: str) -> None:
         """
         Update status for a batch of tasks. Much faster than Parquet operations.
+        This method ensures that only tasks that have been successfully processed (including forecast writing) 
+        are marked as completed. Raises exception on failure to ensure data consistency.
         """
         if not task_updates:
             return
         
         current_time = datetime.now().isoformat()
         
-        with sqlite3.connect(str(self.db_path), timeout=10.0) as conn:
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 
@@ -897,7 +899,7 @@ class SQLiteTaskCoordinator:
                     task_tuple = self._task_to_tuple(task)
                     
                     if status == "done":
-                        # Move from claimed to completed
+                        # Move from claimed to completed - only if forecasts were written successfully
                         conn.execute(
                             "DELETE FROM claimed_tasks WHERE model=? AND version=? AND quantile=? AND horizon=? AND country=? AND window_start=? AND window_end=? AND is_global=?",
                             task_tuple
@@ -922,7 +924,9 @@ class SQLiteTaskCoordinator:
                 
             except Exception as e:
                 conn.rollback()
-                logging.error(f"Failed to update task status: {e}")
+                error_msg = f"Failed to update task status batch: {e}"
+                logging.error(error_msg)
+                raise RuntimeError(error_msg) from e
     
     def get_statistics(self) -> Dict[str, int]:
         """Get task statistics"""
@@ -1031,79 +1035,196 @@ class SQLiteTaskCoordinator:
         
         return remaining_tasks
 
-# ----------------------------- Forecast Output (optimized) -----------------------------
+# ----------------------------- Forecast Database Storage (optimized) -----------------------------
 
-def append_forecasts(out_path: Path, rows: pd.DataFrame) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_file = lock_path(out_path)
+class ForecastDatabase:
+    """
+    SQLite-based forecast storage that's faster and more robust than Parquet files.
+    Uses the same database as task coordination for consistency.
+    """
     
-    for retry in range(3):
-        try:
-            lock = acquire_lock_with_backoff(lock_file, max_retries=2, base_timeout=0.5)
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_forecast_table()
+    
+    def _init_forecast_table(self):
+        """Initialize forecasts table if it doesn't exist"""
+        with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
+            # Enable WAL mode for better concurrent access
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")  
+            conn.execute("PRAGMA cache_size=10000")
+            conn.execute("PRAGMA temp_store=MEMORY")
             
+            # Create forecasts table if it doesn't exist
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS forecasts (
+                    time TEXT NOT NULL,
+                    country TEXT NOT NULL,
+                    true_data REAL,
+                    forecast REAL NOT NULL,
+                    horizon INTEGER NOT NULL,
+                    quantile REAL NOT NULL,
+                    model TEXT NOT NULL,
+                    version TEXT,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    PRIMARY KEY (time, country, horizon, quantile, model, version, window_start, window_end)
+                )
+            """)
+            
+            # Create indexes for fast queries if they don't exist
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_country ON forecasts(country)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_time ON forecasts(time)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_model ON forecasts(model)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_quantile ON forecasts(quantile)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_horizon ON forecasts(horizon)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_time_country ON forecasts(time, country)",
+                "CREATE INDEX IF NOT EXISTS idx_forecasts_model_quantile_horizon ON forecasts(model, quantile, horizon)"
+            ]
+            
+            for index_sql in indexes:
+                conn.execute(index_sql)
+            
+            conn.commit()
+    
+    def append_forecasts(self, rows: pd.DataFrame) -> None:
+        """
+        Append forecast data to the database with transaction safety.
+        Uses SQLite UPSERT (ON CONFLICT DO UPDATE) to overwrite duplicates.
+        Raises exception on failure to ensure calling code can handle it properly.
+        """
+        if rows.empty:
+            return
+        
+        # Prepare data for database insertion
+        df = rows.copy()
+        
+        # Ensure TIME columns are properly formatted as strings
+        df['TIME'] = pd.to_datetime(df['TIME']).dt.strftime('%Y-%m-%d')
+        df['WINDOW_START'] = pd.to_datetime(df['WINDOW_START']).dt.strftime('%Y-%m-%d')
+        df['WINDOW_END'] = pd.to_datetime(df['WINDOW_END']).dt.strftime('%Y-%m-%d')
+        
+        # Rename columns to match database schema (lowercase)
+        df = df.rename(columns={
+            'TIME': 'time',
+            'COUNTRY': 'country', 
+            'TRUE_DATA': 'true_data',
+            'FORECAST': 'forecast',
+            'HORIZON': 'horizon',
+            'QUANTILE': 'quantile',
+            'MODEL': 'model',
+            'VERSION': 'version',
+            'WINDOW_START': 'window_start',
+            'WINDOW_END': 'window_end'
+        })
+        
+        # Ensure all required columns exist
+        required_cols = ['time', 'country', 'forecast', 'horizon', 'quantile', 'model', 'window_start', 'window_end']
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        
+        # Handle optional columns
+        if 'true_data' not in df.columns:
+            df['true_data'] = None
+        if 'version' not in df.columns:
+            df['version'] = None
+
+        # Convert NaNs to None for SQLite compatibility
+        df = df.where(pd.notnull(df), None)
+
+        # Reorder columns to match insert statement
+        insert_cols = [
+            'time', 'country', 'true_data', 'forecast', 'horizon',
+            'quantile', 'model', 'version', 'window_start', 'window_end'
+        ]
+        df = df[insert_cols]
+        params = [tuple(row) for row in df.itertuples(index=False, name=None)]
+        
+        # Write to database with transaction and retry logic
+        for retry in range(3):
             try:
-                with lock:
-                    if out_path.exists():
-                        existing = pq.ParquetFile(out_path).read().to_pandas()
-                        combined = pd.concat([existing, rows], ignore_index=True)
-                        combined = combined.drop_duplicates(
-                            subset=["TIME", "COUNTRY", "HORIZON", "QUANTILE", "MODEL", "VERSION"], 
-                            keep="last"
+                with sqlite3.connect(str(self.db_path), timeout=30.0) as conn:
+                    # Begin explicit transaction
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        sql = (
+                            "INSERT INTO forecasts (time, country, true_data, forecast, horizon, quantile, model, version, window_start, window_end) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(time, country, horizon, quantile, model, version, window_start, window_end) DO UPDATE SET "
+                            "true_data=excluded.true_data, "
+                            "forecast=excluded.forecast"
                         )
-                        combined.sort_values(["TIME", "COUNTRY", "HORIZON", "QUANTILE"], inplace=True)
+                        conn.executemany(sql, params)
+                        conn.commit()
                         
-                        # Atomic write
-                        temp_path = out_path.with_suffix(out_path.suffix + f".tmp_{os.getpid()}")
-                        combined.to_parquet(temp_path, index=False)
-                        temp_path.rename(out_path)
-                    else:
-                        rows.to_parquet(out_path, index=False)
-                    
-                    return  # Success
-                    
-            finally:
-                try:
-                    lock.release()
-                except:
-                    pass
-                    
-        except Exception as e:
-            logging.warning(f"Forecast append attempt {retry + 1} failed: {e}")
-            if retry < 2:
-                wait_time = random.uniform(0.05, 0.15) * (2 ** retry)
-                time.sleep(wait_time)
-            else:
-                logging.error(f"Failed to append forecasts after {retry + 1} attempts: {e}")
+                        logging.debug(f"Successfully upserted {len(df)} forecasts to database")
+                        return  # Success
+                    except Exception as e:
+                        conn.rollback()
+                        raise e
+                        
+            except sqlite3.Error as e:
+                logging.warning(f"Database write attempt {retry + 1} failed: {e}")
+                if retry < 2:
+                    wait_time = random.uniform(0.1, 0.3) * (2 ** retry)
+                    time.sleep(wait_time)
+                else:
+                    error_msg = f"Failed to append forecasts to database after {retry + 1} attempts: {e}"
+                    logging.error(error_msg)
+                    raise RuntimeError(error_msg) from e
+
+# Global forecast database instance
+_forecast_db = None
+
+def get_forecast_database(db_path: Path) -> ForecastDatabase:
+    """Get or create the global forecast database instance"""
+    global _forecast_db
+    if _forecast_db is None or _forecast_db.db_path != db_path:
+        _forecast_db = ForecastDatabase(db_path)
+    return _forecast_db
+
+def append_forecasts(db_path: Path, rows: pd.DataFrame) -> None:
+    """
+    Append forecasts to the SQLite database.
+    This replaces the old Parquet-based function.
+    Raises exception on failure to ensure calling code can handle it properly.
+    """
+    forecast_db = get_forecast_database(db_path)
+    forecast_db.append_forecasts(rows)
 
 def append_forecasts_batch(forecast_batch: List[Tuple[float, int, pd.DataFrame]], paths: Dict[str, Path]) -> None:
     """
-    Append a batch of forecasts grouped by quantile and horizon to reduce I/O operations.
+    Append a batch of forecasts to the database.
     forecast_batch: List of (quantile, horizon, forecast_df) tuples
+    Raises exception on failure to ensure calling code can handle it properly.
     """
     if not forecast_batch:
         return
     
-    # Group forecasts by (quantile, horizon) to minimize file operations
-    grouped_forecasts = {}
-    for quantile, horizon, forecast_df in forecast_batch:
-        key = (quantile, horizon)
-        if key not in grouped_forecasts:
-            grouped_forecasts[key] = []
-        grouped_forecasts[key].append(forecast_df)
+    # Get database path from paths dict
+    db_path = paths.get("task_coordination_db")
+    if db_path is None:
+        # Fallback to constructing from output directory
+        db_path = paths["output"] / "task_coordination.db"
     
-    # Append each group to its respective file
-    for (quantile, horizon), df_list in grouped_forecasts.items():
-        if not df_list:
-            continue
+    # Combine all forecasts into a single DataFrame for batch insertion
+    all_forecasts = []
+    for quantile, horizon, forecast_df in forecast_batch:
+        if not forecast_df.empty:
+            all_forecasts.append(forecast_df)
+    
+    if all_forecasts:
+        combined_df = pd.concat(all_forecasts, ignore_index=True)
         
-        # Combine all forecasts for this (quantile, horizon) pair
-        combined_df = pd.concat(df_list, ignore_index=True)
+        # This will raise an exception if it fails, which is what we want
+        forecast_db = get_forecast_database(db_path)
+        forecast_db.append_forecasts(combined_df)
         
-        # Append to the appropriate file
-        out_path = paths["forecasts_root"] / f"q={quantile}" / f"h={horizon}" / "rolling_window.parquet"
-        append_forecasts(out_path, combined_df)
-        
-        logging.debug(f"Appended batch of {len(combined_df)} forecasts to q={quantile}, h={horizon}")
+        logging.debug(f"Appended batch of {len(combined_df)} forecasts to database")
 
 
 
@@ -1203,7 +1324,8 @@ def _build_nn(
         prefit_AR=bool(nn_params.get("prefit_AR", True)),
         time_col="TIME",
         verbose=0,
-        turn_on_neural_net=nn_params.get("turn_on_neural_net", True)
+        turn_on_neural_net=nn_params.get("turn_on_neural_net", True),
+        turn_on_ar=nn_params.get("turn_on_ar", True)
     )
 
     epochs = int(nn_params.get("epochs", 100))
@@ -1298,7 +1420,8 @@ def _load_nn_global(
         country_ids=country_names,  # Pass country names for global model
         time_col="TIME",
         verbose=0,
-        turn_on_neural_net=nn_params.get("turn_on_neural_net", True)
+        turn_on_neural_net=nn_params.get("turn_on_neural_net", True),
+        turn_on_ar=nn_params.get("turn_on_ar", True)
     )
 
     mdl.load_model(model_path)
@@ -1337,13 +1460,14 @@ def _predict_nn_single(
     mdl: EnsembleNNAPI,
     full_country_df: pd.DataFrame,
     country_id: str,
+    country_idx: int,
     time_col: str,
     window_end: pd.Timestamp,
     horizon: int,
     quantile: float
 ) -> float:
     test_df = full_country_df.loc[full_country_df[time_col] >= window_end].copy()
-    preds, _targets = mdl.predict_per_country(test_df, country_id)
+    preds, _targets = mdl.predict_per_country(test_df, country_id, country_idx)
     arr = np.asarray(preds)
     
     if arr.ndim == 3:
@@ -1507,7 +1631,7 @@ def execute_single_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict[st
         elif task.model == "ar-qr":
             yhat = _predict_lqr_single(model_obj, df, target, time_col, we, task.horizon, task.quantile, ar_only=True)
         elif task.model == "nn":
-            yhat = _predict_nn_single(model_obj, df, task.country, time_col, we, task.horizon, task.quantile)
+            yhat = _predict_nn_single(model_obj, df, task.country, 0, time_col, we, task.horizon, task.quantile)
         else:
             raise ValueError(f"Unknown model for prediction: {task.model}")
         
@@ -1613,7 +1737,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
         
         # Generate forecasts for ALL countries using cached data
         rows = []
-        for country in _global_data_cache.keys():
+        for country_idx, country in enumerate(_global_data_cache.keys()):
             try:
                 dfc = get_cached_country_data(country)
                 if target not in dfc.columns:
@@ -1632,7 +1756,7 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
                 true_val = float(dfc.iloc[k][target]) if target in dfc.columns else np.nan
                 
                 # Predict for this country
-                yhat = _predict_nn_single(model_obj, dfc, country, time_col, we, task.horizon, task.quantile)
+                yhat = _predict_nn_single(model_obj, dfc, country, country_idx, time_col, we, task.horizon, task.quantile)
                 
                 rows.append({
                     "TIME": t_forecast,
@@ -1655,6 +1779,8 @@ def execute_global_nn_task_batch(task: TaskKey, cfg: Dict[str, Any], paths: Dict
         
         out_df = pd.DataFrame(rows)
         
+
+    
         # Return success, task update, and forecast data for batch processing
         task_update = (task, "done", None, model_path, len(out_df))
         logging.info(f"Completed global task: {task.id()} with {len(out_df)} forecasts")
@@ -1677,16 +1803,26 @@ def execute_single_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, Pat
     """
     success, task_update, forecast_df = execute_single_task_batch(task, cfg, paths, instance_id)
     
-    # Update status immediately for single task execution
-    if task_update:
+    # ATOMIC OPERATION: Write forecast first, then update task status
+    # This ensures we never have completed tasks without forecasts
+    if success and forecast_df is not None:
+        try:
+            # Write forecast to database first
+            db_path = paths.get("task_coordination_db", paths["output"] / "task_coordination.db")
+            append_forecasts(db_path, forecast_df)
+            
+            # Only update status as completed if forecast was written successfully
+            if task_update:
+                update_task_batch_status(paths["progress_parquet"], [task_update], instance_id)
+        except Exception as e:
+            logging.error(f"Failed to write forecast for task {task.id()}: {e}")
+            # Mark task as failed instead of completed
+            failed_update = (task, "failed", f"Forecast write failed: {e}", None, 0)
+            update_task_batch_status(paths["progress_parquet"], [failed_update], instance_id)
+            return False
+    elif task_update:
+        # Handle failed tasks (no forecast to write)
         update_task_batch_status(paths["progress_parquet"], [task_update], instance_id)
-    
-    # Save forecast immediately for single task execution
-    if forecast_df is not None:
-        q = task.quantile
-        h = task.horizon
-        out_path = paths["forecasts_root"] / f"q={q}" / f"h={h}" / "rolling_window.parquet"
-        append_forecasts(out_path, forecast_df)
     
     return success
 
@@ -1697,16 +1833,26 @@ def execute_global_nn_task(task: TaskKey, cfg: Dict[str, Any], paths: Dict[str, 
     """
     success, task_update, forecast_df = execute_global_nn_task_batch(task, cfg, paths, instance_id)
     
-    # Update status immediately for single task execution
-    if task_update:
+    # ATOMIC OPERATION: Write forecast first, then update task status
+    # This ensures we never have completed tasks without forecasts
+    if success and forecast_df is not None:
+        try:
+            # Write forecast to database first
+            db_path = paths.get("task_coordination_db", paths["output"] / "task_coordination.db")
+            append_forecasts(db_path, forecast_df)
+            
+            # Only update status as completed if forecast was written successfully
+            if task_update:
+                update_task_batch_status(paths["progress_parquet"], [task_update], instance_id)
+        except Exception as e:
+            logging.error(f"Failed to write forecast for global task {task.id()}: {e}")
+            # Mark task as failed instead of completed
+            failed_update = (task, "failed", f"Forecast write failed: {e}", None, 0)
+            update_task_batch_status(paths["progress_parquet"], [task_update], instance_id)
+            return False
+    elif task_update:
+        # Handle failed tasks (no forecast to write)
         update_task_batch_status(paths["progress_parquet"], [task_update], instance_id)
-    
-    # Save forecast immediately for single task execution
-    if forecast_df is not None:
-        q = task.quantile
-        h = task.horizon
-        out_path = paths["forecasts_root"] / f"q={q}" / f"h={h}" / "rolling_window.parquet"
-        append_forecasts(out_path, forecast_df)
     
     return success
 
@@ -1918,13 +2064,37 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
             if forecast_df is not None:
                 forecast_batch.append((task.quantile, task.horizon, forecast_df))
         
-        # Update all task statuses using fast SQLite coordinator
-        if task_updates:
-            coordinator.update_task_status_batch(task_updates, instance_id)
+        # ATOMIC OPERATION: Write forecasts first, then mark tasks as completed
+        # This ensures we never have completed tasks without forecasts
+        completed_task_updates = []
+        failed_task_updates = []
         
-        # Append all forecasts in a single batch operation
+        # Separate completed vs failed tasks
+        for task_update in task_updates:
+            task, status, error_msg, model_path, forecast_rows = task_update
+            if status == "done":
+                completed_task_updates.append(task_update)
+            else:
+                failed_task_updates.append(task_update)
+        
+        # First, write all forecasts to database
         if forecast_batch:
-            append_forecasts_batch(forecast_batch, paths)
+            try:
+                append_forecasts_batch(forecast_batch, paths)
+                logging.debug(f"Successfully wrote {len(forecast_batch)} forecast batches to database")
+            except Exception as e:
+                logging.error(f"Failed to write forecasts to database: {e}")
+                # If forecast writing fails, mark all completed tasks as failed instead
+                for task_update in completed_task_updates:
+                    task, _, _, model_path, _ = task_update
+                    failed_task_update = (task, "failed", f"Forecast write failed: {e}", model_path, 0)
+                    failed_task_updates.append(failed_task_update)
+                completed_task_updates = []  # No tasks should be marked as completed
+        
+        # Then, update task statuses - only mark as completed if forecasts were written successfully
+        all_updates = completed_task_updates + failed_task_updates
+        if all_updates:
+            coordinator.update_task_status_batch(all_updates, instance_id)
         
         completed += batch_completed
         failed += batch_failed
@@ -1984,17 +2154,19 @@ def make_paths(cfg: Dict[str, Any]) -> Dict[str, Path]:
     
     paths = {
         "data_path": Path(cfg["data"]["path"]).absolute(),
+        "output": root,
         "output_root": root,
         "models_root": root / cfg["io"]["models_dir"],
         "forecasts_root": root / cfg["io"]["forecasts_dir"],
         "progress_parquet": root / cfg["io"]["progress_parquet"],
         "errors_parquet": root / cfg["io"]["errors_parquet"],
         "logs_dir": root / cfg["io"]["logs_dir"],
+        "task_coordination_db": root / "task_coordination.db",
     }
     
     # Ensure directories exist
     for key, path in paths.items():
-        if key in ["data_path", "output_root"]:
+        if key in ["data_path", "output_root", "output"]:
             continue
         if isinstance(path, Path) and path.suffix == "":  # Directory
             safe_mkdirs(path)

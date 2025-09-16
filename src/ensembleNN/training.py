@@ -300,7 +300,7 @@ class EnsembleNNTrainer:
         baseline_output_mean = all_baseline_residuals.mean(axis=0)
 
         return baseline_output_mean, baseline_output_sd
-    #@torch.compile
+    @torch.compile
     def fit(
         self,
         train_loaders: List[DataLoader],
@@ -327,9 +327,7 @@ class EnsembleNNTrainer:
             
         Returns:
             Training history
-        """
-        print(f"Training on device: {self.device}")
-       
+        """    
 
         optimizer = self._get_optimizer(optimizer_type, learning_rate, l2)
         early_stopping = EarlyStopping(patience, ensemble_size=self.model.n_models) if val_loader is not None else None

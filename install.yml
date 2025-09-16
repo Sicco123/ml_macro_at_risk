@@ -5,9 +5,10 @@ channels:
   - defaults
 dependencies:
   - python=3.13.3
+  - R
   - pip>=24.2.0
   - cpuonly>=2.0
-  - pytorch=2.8.0
+  - pytorch>=2.7.0
   - torchvision>=0.20.0
   - pip:
     - pytorch-lightning>=2.4.0
@@ -25,3 +26,7 @@ dependencies:
     - statsmodels
     - numpy
     - pandas
+    - rpy2
+    - joblib
+    - scikit-learn
+

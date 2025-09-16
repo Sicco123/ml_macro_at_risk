@@ -15,7 +15,7 @@ data:
   missing: forward_fill_then_mean      # forward fill, then mean imputation
 
 rolling_window:
-  size: 192                             # training window size (in periods)
+  size: 141                             # training window size (in periods)
   step: 1                              # how many periods to advance the window
   start: auto                          # 'auto' => use splits.test_cutoff
   end: auto                            # 'auto' => last available date
@@ -27,8 +27,8 @@ splits:
 runtime:
   allow_reload: false                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  num_workers: 10                       # hint for how many workers will be working
-  batch_size: 100                       # INCREASED: number of tasks to claim and process per batch
+  num_workers: 6                       # hint for how many workers will be working
+  batch_size: 60                       # INCREASED: number of tasks to claim and process per batch
   max_ram_gb: 30.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
   mem_probe_fudge_mb: 200              # extra margin on top of probe
@@ -49,7 +49,7 @@ models:
   - type: ar-qr
     enabled: true
     versions:
-      - name: T192
+      - name: T141
         params:
           solver: huberized
           alphas: [0.0]
@@ -59,7 +59,7 @@ models:
   - type: lqr
     enabled: true
     versions:
-      - name: T192
+      - name: T141
         params:
           solver: huberized
           alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
@@ -81,6 +81,6 @@ models:
           patience: 50
           parallel_models: 10
           device: cpu
-          l2_penalty: 1.0e-4
+          l2_penalty: 0.0
           validation_size: 0.3
 

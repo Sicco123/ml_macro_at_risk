@@ -1,6 +1,10 @@
 #!/bin/bash
 
-# Launch multiple workers for parallel processing
+# Launch m# module load 2023 PyTorch/2.1.2-foss-2023a SciPy-bundle/2023.07-gfbf-2023a matplotlib/3.7.2-gfbf-2023a PyYAML/6.0-GCCcore-12.3.0 statsmodels/0.14.1-gfbf-2023a tqdm/4.66.1-GCCcore-12.3.0 typing-extensions/4.9.0-GCCcore-12.3.0
+# source .venv/bin/activate
+module load 2025
+module load Anaconda3/2025.06-1
+source activate mlrkers for parallel processing
 # Usage: ./launch_workers.sh <config_file> [num_workers]
 
 if [ $# -lt 1 ]; then
@@ -21,8 +25,16 @@ echo "Launching $NUM_WORKERS workers with config: $CONFIG_FILE"
 #cp -r /home/skooiker/ml_macro_at_risk /scratch-local/skooiker/
 #cd /scratch-local/skooiker/ml_macro_at_risk || { echo "Failed to change directory"; exit 1; }
 
-module load 2023 PyTorch/2.1.2-foss-2023a SciPy-bundle/2023.07-gfbf-2023a matplotlib/3.7.2-gfbf-2023a scikit-learn/1.3.1-gfbf-2023a PyYAML/6.0-GCCcore-12.3.0 statsmodels/0.14.1-gfbf-2023a tqdm/4.66.1-GCCcore-12.3.0 typing-extensions/4.9.0-GCCcore-12.3.0
-source .venv/bin/activate
+# module load 2023 PyTorch/2.1.2-foss-2023a SciPy-bundle/2023.07-gfbf-2023a matplotlib/3.7.2-gfbf-2023a scikit-learn/1.3.1-gfbf-2023a PyYAML/6.0-GCCcore-12.3.0 statsmodels/0.14.1-gfbf-2023a tqdm/4.66.1-GCCcore-12.3.0 typing-extensions/4.9.0-GCCcore-12.3.0
+# source .venv/bin/activate
+module load 2025
+module load Anaconda3/2025.06-1
+
+# Initialize conda for bash shell
+eval "$(conda shell.bash hook)"
+
+# Activate the conda environment
+source activate ml
 
 # Limit threading for scientific libraries
 export OMP_NUM_THREADS=1

@@ -108,7 +108,8 @@ class EnsembleNN(nn.Module):
         activation: ActivationType = "relu",
         intercepts_init = None,
         phis_init =  None,
-        turn_on_neural_net: bool = True
+        turn_on_neural_net: bool = True, 
+        turn_on_ar: bool = True
     ):
         """Initialize Ensemble Factor Neural Network.
         
@@ -141,7 +142,7 @@ class EnsembleNN(nn.Module):
         
 
         # compile models
-        #self.models.compile()
+        self.models.compile()
            
 
         self.ar_models = nn.ModuleList([
@@ -149,37 +150,45 @@ class EnsembleNN(nn.Module):
             for _ in range(n_models)
         ])
 
-        #self.ar_models.compile()
+        self.ar_models.compile()
 
         self.turn_on_neural_net = turn_on_neural_net
+        self.turn_on_ar = turn_on_ar
         #logger.info(f"Created EnsembleFactorNN with {n_models} models")
     
 
     def forward(self, x: torch.Tensor, country_codes: torch.Tensor, return_ensemble: bool = True, per_model_inputs: bool = True) -> torch.Tensor:
-
+        
+        if not self.turn_on_neural_net and not self.turn_on_ar:
+            raise ValueError("Both neural net and AR are turned off.")
+        
+        # Fast path: use list comprehensions for better PyTorch optimization
         if per_model_inputs:
-            # x[i] is (batch, features), need to extract first feature for AR
-            if self.turn_on_neural_net:
+            if self.turn_on_neural_net and self.turn_on_ar:
                 ensemble = torch.stack([
                     m(x[i,:,:]) + ar_m(x[i, :, 0:1], country_codes[i]) 
                     for i, (m, ar_m) in enumerate(zip(self.models, self.ar_models))
                 ], dim=0)
-            else:
+            elif self.turn_on_neural_net:
+                ensemble = torch.stack([
+                    m(x[i,:,:]) for i, m in enumerate(self.models)
+                ], dim=0)
+            else:  # only AR
                 ensemble = torch.stack([
                     ar_m(x[i, :, 0:1], country_codes[i]) 
                     for i, ar_m in enumerate(self.ar_models)
                 ], dim=0)
         else:
-            if self.turn_on_neural_net:
-                # x is (batch, features), extract first feature for AR  
+            if self.turn_on_neural_net and self.turn_on_ar:
                 ensemble = torch.stack([
-                    m(x[:,:]) + ar_m(x[:, 0:1], country_codes) 
+                    m(x) + ar_m(x[:, 0:1], country_codes) 
                     for m, ar_m in zip(self.models, self.ar_models)
                 ], dim=0)
-            else:
+            elif self.turn_on_neural_net:
+                ensemble = torch.stack([m(x) for m in self.models], dim=0)
+            else:  # only AR
                 ensemble = torch.stack([
-                    ar_m(x[:, 0:1], country_codes) 
-                    for ar_m in self.ar_models
+                    ar_m(x[:, 0:1], country_codes) for ar_m in self.ar_models
                 ], dim=0)
         
         return ensemble if return_ensemble else ensemble.mean(dim=0)

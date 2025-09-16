@@ -1,0 +1,191 @@
+# ...existing code...
+import torch
+from torch.utils.data import Dataset, DataLoader
+# Add Subset
+from torch.utils.data import Subset
+# ...existing code...
+
+class CountryTimeSeriesDataset(Dataset):
+    # ...existing code...
+    def _build_dataset(self):
+        """Build the dataset tensors."""
+        all_features = []
+        all_targets = []
+        all_countries = []
+        all_times = []
+        # Keep a mapping so we can split per country efficiently later
+        self.country_to_id = {}
+
+        if len(self.data.items()) > 1:
+            # Fix: ensure we increment country id per country
+            for idx, (country_code, df) in enumerate(self.data.items()):
+                self.country_to_id[country_code] = idx
+                features, targets, times = self._process_country_data(df, country_code)
+                if len(features) > 0:
+                    # store as float32 to reduce memory (you cast to torch.float later anyway)
+                    all_features.append(features.astype(np.float32, copy=False))
+                    all_targets.append(targets.astype(np.float32, copy=False))
+                    all_countries.extend([idx] * len(features))
+                    all_times.extend(times)
+        else:
+            country_code, df = next(iter(self.data.items()))
+            self.country_to_id[country_code] = 0
+            features, targets, times = self._process_country_data(df, country_code)
+            if len(features) > 0:
+                all_features.append(features.astype(np.float32, copy=False))
+                all_targets.append(targets.astype(np.float32, copy=False))
+                all_countries.extend([0] * len(features))
+                all_times.extend(times)
+
+        if not all_features:
+            raise ValueError("No valid samples found in dataset")
+
+        # Concatenate all countries
+        self.features = np.vstack(all_features).astype(np.float32, copy=False)
+        self.targets = np.vstack(all_targets).astype(np.float32, copy=False)
+        del all_features
+        del all_targets
+
+        # Keep countries as a compact 1D int array
+        self.countries = np.asarray(all_countries, dtype=np.int32)
+        self.times = all_times
+
+        # Handle rare object dtype edge cases (kept minimal, but now to float32)
+        if self.features.dtype == object:
+            try:
+                self.features = self.features.astype(np.float32)
+            except (ValueError, TypeError):
+                self.features = np.array(
+                    [[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.features],
+                    dtype=np.float32
+                )
+
+        if self.targets.dtype == object:
+            try:
+                self.targets = self.targets.astype(np.float32)
+            except (ValueError, TypeError):
+                self.targets = np.array(
+                    [[float(x) if pd.notna(x) and x is not None else 0.0 for x in row] for row in self.targets],
+                    dtype=np.float32
+                )
+    # ...existing code...
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        # ...existing code...
+        try:
+            features = torch.from_numpy(self.features[idx]).float()
+            targets = torch.from_numpy(self.targets[idx]).float()
+            # countries is 1D; return a small 1x1 tensor to preserve previous shape expectations
+            country_codes = torch.tensor([[int(self.countries[idx])]], dtype=torch.int32)
+            return features, targets, country_codes
+        except Exception as e:
+            # ...existing code...
+            return torch.zeros(feature_dim), torch.zeros(target_dim)
+# ...existing code...
+
+def create_data_loaders(
+    data: Dict[str, pd.DataFrame],
+    ensemble_size: int,
+    target_col: str,
+    quantiles: List[float],
+    horizons: List[int],
+    lags: List[int] = [1],
+    batch_size: int = 256,
+    shuffle: bool = True,
+    num_workers: int = 0,
+    seed: Optional[int] = None,
+    val_size: Optional[float] = None,
+) -> Tuple[List[DataLoader], Optional[List[DataLoader]]]:
+    """Create train and validation data loaders efficiently by building the dataset once
+    and using index subsets per ensemble split."""
+    train_loaders: List[DataLoader] = []
+    val_loaders: List[Optional[DataLoader]] = []
+
+    # Build a single base dataset (big memory win)
+    base_dataset = CountryTimeSeriesDataset(
+        data, target_col, quantiles, horizons, lags
+    )
+
+    # Helper: per-country indices on the base dataset
+    # countries stored as ints; we need mapping from country str -> int id
+    country_to_id = getattr(base_dataset, "country_to_id", None)
+    if country_to_id is None:
+        raise RuntimeError("Country mapping missing on dataset")
+
+    # Precompute indices per country (views over one big arrays, no copies)
+    per_country_indices = {}
+    countries_1d = base_dataset.countries  # shape (N,)
+    for country_str, cid in country_to_id.items():
+        per_country_indices[country_str] = np.where(countries_1d == cid)[0]
+
+    use_cuda = torch.cuda.is_available()
+
+    for i in range(ensemble_size):
+        gen = None
+        if seed is not None:
+            gen = torch.Generator()
+            gen.manual_seed(seed + i)
+
+        if val_size is not None and val_size > 0.0:
+            train_idx_all = []
+            val_idx_all = []
+            # Split per country to mirror the previous behavior
+            for country_str, idx_arr in per_country_indices.items():
+                n = len(idx_arr)
+                n_val = int(n * val_size)
+                if n_val <= 0:
+                    train_idx_all.append(idx_arr)
+                    continue
+
+                if shuffle:
+                    # Use torch.randperm with generator for reproducibility per ensemble
+                    perm = torch.randperm(n, generator=gen).numpy()
+                    idx_perm = idx_arr[perm]
+                else:
+                    idx_perm = idx_arr  # keep order
+
+                train_idx_all.append(idx_perm[:-n_val])
+                val_idx_all.append(idx_perm[-n_val:])
+
+            # Concatenate per-country splits
+            train_indices = np.concatenate(train_idx_all) if len(train_idx_all) else np.array([], dtype=np.int64)
+            val_indices = np.concatenate(val_idx_all) if len(val_idx_all) else np.array([], dtype=np.int64)
+
+            train_subset = Subset(base_dataset, train_indices.tolist())
+            val_subset = Subset(base_dataset, val_indices.tolist())
+
+            train_loader = DataLoader(
+                train_subset,
+                batch_size=batch_size,
+                shuffle=shuffle,          # shuffle within the subset each epoch
+                num_workers=num_workers,
+                generator=gen,
+                pin_memory=use_cuda,
+                persistent_workers=(num_workers > 0),
+            )
+            val_loader = DataLoader(
+                val_subset,
+                batch_size=batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=use_cuda,
+                persistent_workers=(num_workers > 0),
+            )
+        else:
+            # No validation: just use the whole dataset once
+            train_loader = DataLoader(
+                base_dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                num_workers=num_workers,
+                generator=gen,
+                pin_memory=use_cuda,
+                persistent_workers=(num_workers > 0),
+            )
+            val_loader = None
+
+        train_loaders.append(train_loader)
+        val_loaders.append(val_loader)
+
+    return train_loaders, val_loaders
+# ...existing code...

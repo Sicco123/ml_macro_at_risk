@@ -44,6 +44,8 @@ class QuantileAnalyzer:
         self.data = {}
         self.covid_start = pd.Timestamp('2020-03-01')
         self.covid_end = pd.Timestamp('2021-12-31')
+        self.test_start = pd.Timestamp(self.config['test_period']['start_date'])
+        self.test_end = pd.Timestamp(self.config['test_period']['end_date'])
         
         # Set up paths
         self.output_dir = Path(self.config['output']['base_dir'])
@@ -62,28 +64,51 @@ class QuantileAnalyzer:
             (self.output_dir / dir_name).mkdir(parents=True, exist_ok=True)
     
     def load_data(self):
-        """Load all forecast data from the quantile runner output."""
-        print("Loading forecast data...")
+        """Load all forecast data from the SQLite database."""
+        print("Loading forecast data from database...")
         
-        all_data = []
+        # Get database path from config
+        if 'database' in self.config['input']:
+            db_path = Path(self.config['input']['database'])
+        else:
+            # Default to the standard location
+            db_path = self.forecasts_dir.parent / "task_coordination.db"
         
-        # Iterate through all quantile/horizon combinations
-        for q_dir in self.forecasts_dir.glob("q=*"):
-            quantile = float(q_dir.name.split('=')[1])
+        if not db_path.exists():
+            raise ValueError(f"Database file not found: {db_path}")
+        
+        # Connect to database and load all forecast data
+        import sqlite3
+        
+        with sqlite3.connect(str(db_path)) as conn:
+            # Read all forecasts from database
+            query = """
+                SELECT time, country, true_data, forecast, horizon, quantile, model, version, window_start, window_end
+                FROM forecasts
+                ORDER BY time, country, horizon, quantile, model, version
+            """
             
-            for h_dir in q_dir.glob("h=*"):
-                horizon = int(h_dir.name.split('=')[1])
-                
-                parquet_file = h_dir / "rolling_window.parquet"
-                if parquet_file.exists():
-                    df = pd.read_parquet(parquet_file)
-                    df['TIME'] = pd.to_datetime(df['TIME'])
-                    all_data.append(df)
+            self.data = pd.read_sql_query(query, conn)
         
-        if not all_data:
-            raise ValueError("No forecast data found!")
+        if len(self.data) == 0:
+            raise ValueError("No forecast data found in database!")
         
-        self.data = pd.concat(all_data, ignore_index=True)
+        # Convert time columns to datetime
+        self.data['TIME'] = pd.to_datetime(self.data['time'])
+        self.data = self.data.drop('time', axis=1)  # Remove the original time column
+        
+        # Rename columns to match expected format (uppercase)
+        self.data = self.data.rename(columns={
+            'country': 'COUNTRY',
+            'true_data': 'TRUE_DATA', 
+            'forecast': 'FORECAST',
+            'horizon': 'HORIZON',
+            'quantile': 'QUANTILE',
+            'model': 'MODEL',
+            'version': 'VERSION',
+            'window_start': 'WINDOW_START',
+            'window_end': 'WINDOW_END'
+        })
         
         # Create a combined model identifier that includes version information
         if 'VERSION' in self.data.columns:
@@ -92,8 +117,30 @@ class QuantileAnalyzer:
             self.data['MODEL_FULL'] = self.data['MODEL'].astype(str)
         
         self.data = self.data.sort_values(['TIME', 'COUNTRY', 'HORIZON', 'QUANTILE', 'MODEL_FULL'])
+
+        # write to a file the number of rows per model, quantile, horizon
+        summary = self.data.groupby(['MODEL_FULL', 'QUANTILE', 'HORIZON']).size().reset_index(name='N_ROWS')
+        summary.to_csv(self.output_dir / 'data_summary.csv', index=False)
+
+
+
+        # check which dates are missing per model, country, quantile, horizon between test_start and test_end
+        all_dates = pd.date_range(self.test_start, self.test_end, freq='MS')
+        missing_summary = []
+        for (model, country, quantile, horizon), group in self.data.groupby(['MODEL_FULL', 'COUNTRY', 'QUANTILE', 'HORIZON']):
+            group_dates = pd.to_datetime(group['WINDOW_END'].unique())
+            missing_dates = set(all_dates) - set(group_dates)
+            if missing_dates:
+                missing_summary.append({
+                    'MODEL_FULL': model[-4:],
+                    'QUANTILE': quantile,
+                    'HORIZON': horizon,
+                    'MISSING_DATES': ','.join(sorted([d.strftime('%Y-%m-%d') for d in missing_dates]))
+            })
+        missing_df = pd.DataFrame(missing_summary)
+        missing_df.to_csv(self.output_dir / 'missing_dates_summary.csv', index=False, sep= ",")
         
-        print(f"Loaded {len(self.data)} forecasts")
+        print(f"Loaded {len(self.data)} forecasts from database")
         print(f"Models: {sorted(self.data['MODEL_FULL'].unique())}")
         print(f"Countries: {sorted(self.data['COUNTRY'].unique())}")
         print(f"Quantiles: {sorted(self.data['QUANTILE'].unique())}")
