@@ -131,7 +131,7 @@ class LQR:
         for country_code, df in self.target_data.items():
             # Feature columns (exclude TIME and target horizons)
             feature_cols = [col for col in df.columns 
-                           if col not in ["TIME"] ]
+                           if col not in ["TIME", self.target] ]
             
             # # Exclude contemporaneous target if present
             # if self.target in feature_cols:
@@ -139,11 +139,11 @@ class LQR:
 
             
             # Target columns
-            target_cols = [f"{self.target}_h{h}" for h in self.forecast_horizons] + [self.target]
+            target_cols = [f"{self.target}_h{h}" for h in self.forecast_horizons] 
             
             # remove target columns from features
             feature_cols = [col for col in feature_cols if col not in target_cols]
-    
+
             # Extract data
             feature_cols = [self.target] + feature_cols
             features = df[feature_cols].values
@@ -159,6 +159,7 @@ class LQR:
         self.X = np.vstack(all_features)
      
         self.y = np.vstack(all_targets)
+    
 
         self.countries = np.array(all_countries)
         
@@ -272,7 +273,9 @@ class LQR:
             self.is_fitted = True
             
             #logger.info("LQR model fitted successfully")
-            
+            # print first two coefs
+            print(coef_df.head(2))
+
             return coef_df
         
     def predict(self, data_list: List[pd.DataFrame]) -> np.ndarray:
@@ -308,12 +311,13 @@ class LQR:
         all_targets = []
         for country_code, df in pred_target_data.items():
             feature_cols = [col for col in df.columns 
-                           if col not in ["TIME"] ]
+                           if col not in ["TIME", self.target] ]
             target_cols = [f"{self.target}_h{h}" for h in self.forecast_horizons]
             
             # remove target columns from features
             feature_cols = [col for col in feature_cols if col not in target_cols]
             
+            feature_cols = [self.target] + feature_cols
             features = df[feature_cols].values
             targets = df[target_cols].values
             all_features.append(features)

@@ -233,8 +233,8 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         alpha: float = 1.0,
         fit_intercept: bool = True,
         solver: SolverType = "pinball",
-        max_iter: int = 1000,
-        tol: float = 1e-6
+        max_iter: int = 10000,
+        tol: float = 1e-8
     ):
         """Initialize quantile regressor.
         
@@ -304,7 +304,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
             init[0] = np.median(y)
         else:
             init = np.zeros(p, dtype=np.float64)
-
+   
         result = minimize(
             fun=pinball_loss,      # keep your existing function
             x0=init,
@@ -313,6 +313,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
             method="L-BFGS-B",
             options={"maxiter": self.max_iter, "ftol": self.tol}
         )
+       
         
         if not result.success:
             logger.warning(f"Optimization did not converge: {result.message}")
@@ -321,6 +322,7 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         if self.fit_intercept:
             self.intercept_ = result.x[0]
             self.coef_ = result.x[1:]
+            
         else:
             self.intercept_ = 0.0
             self.coef_ = result.x
