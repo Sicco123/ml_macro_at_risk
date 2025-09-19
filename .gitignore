@@ -224,3 +224,4 @@ analysis_output/
 *.out
 *.db
 *.pyc
+*.db.*
