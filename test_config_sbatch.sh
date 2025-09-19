@@ -7,11 +7,11 @@
 #SBATCH --cpus-per-task=24
 #SBATCH --mail-user=s.h.kooiker@vu.nl
 #SBATCH --mail-type=end,fail
-#SBATCH --time=2:00:00
+#SBATCH --time=1:00:00
 
 cd $HOME/ml_macro_at_risk
 
-CONFIG_FILE=test_config_sub.yaml
+CONFIG_FILE=test_config_ar.yaml
 NUM_WORKERS=24  # Default to 14 workers if not specified
 
 echo "Launching $NUM_WORKERS workers with config: $CONFIG_FILE"
@@ -19,6 +19,11 @@ echo "Launching $NUM_WORKERS workers with config: $CONFIG_FILE"
 
 module load 2025
 module load Anaconda3/2025.06-1
+source activate mlrkers for parallel processing
+# Initialize conda for bash shell
+eval "$(conda shell.bash hook)"
+
+# Activate the conda environment
 source activate ml
 
 # Limit threading for scientific libraries

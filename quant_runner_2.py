@@ -1324,8 +1324,8 @@ def _build_nn(
         prefit_AR=bool(nn_params.get("prefit_AR", True)),
         time_col="TIME",
         verbose=0,
-        turn_on_neural_net=nn_params.get("turn_on_neural_net", True),
-        turn_on_ar=nn_params.get("turn_on_ar", True)
+        turn_on_neural_net=bool(nn_params.get("turn_on_neural_net", True)),
+        turn_on_ar=bool(nn_params.get("turn_on_ar", True))
     )
 
     epochs = int(nn_params.get("epochs", 100))
@@ -1373,6 +1373,8 @@ def _build_nn_global(
         prefit_AR=bool(nn_params.get("prefit_AR", True)),  # Enable for global models
         country_ids=country_names,  # Pass country names for global model
         time_col="TIME",
+        turn_on_neural_net=bool(nn_params.get("turn_on_neural_net", True)),
+        turn_on_ar=bool(nn_params.get("turn_on_ar", True)),
         verbose=0
     )
 
@@ -1420,8 +1422,8 @@ def _load_nn_global(
         country_ids=country_names,  # Pass country names for global model
         time_col="TIME",
         verbose=0,
-        turn_on_neural_net=nn_params.get("turn_on_neural_net", True),
-        turn_on_ar=nn_params.get("turn_on_ar", True)
+         turn_on_neural_net=bool(nn_params.get("turn_on_neural_net", True)),
+        turn_on_ar=bool(nn_params.get("turn_on_ar", True))
     )
 
     mdl.load_model(model_path)
@@ -2113,7 +2115,7 @@ def run_single_core_loop(cfg: Dict[str, Any], paths: Dict[str, Path], instance_i
         
         
         # Show memory usage and task statistics periodically
-        if (completed + failed) % 1 == 0:
+        if (completed + failed) % 100 == 0:
             try:
                 process = psutil.Process()
                 memory_mb = process.memory_info().rss / 1024 / 1024

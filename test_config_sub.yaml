@@ -27,7 +27,7 @@ splits:
 runtime:
   allow_reload: false                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  num_workers: 4                       # hint for how many workers will be working
+  num_workers: 24                       # hint for how many workers will be working
   batch_size: 1                       # INCREASED: number of tasks to claim and process per batch
   max_ram_gb: 30.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
@@ -67,7 +67,7 @@ models:
           cv_splits: 10
 
   - type: nn
-    enabled: true
+    enabled: false
     per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
       - name: ar-nn-32-32-32-32-32
@@ -87,7 +87,7 @@ models:
           turn_on_ar: true
 
   - type: nn
-    enabled: false
+    enabled: true
     per_country: false  # true = train separate model for each country, false = train global model on all countries
     versions:
       - name: panel-ar
@@ -96,7 +96,7 @@ models:
           activation: relu
           optimizer: adam
           learning_rate: 5.0e-5
-          epochs: 1
+          epochs: 1500
           batch_size: 32
           patience: 5
           parallel_models: 10

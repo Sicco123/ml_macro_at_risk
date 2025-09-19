@@ -280,7 +280,8 @@ def create_data_loaders(
                 shuffle=shuffle,
                 num_workers=num_workers,
                 generator=generator,
-                pin_memory=torch.cuda.is_available()
+                pin_memory=torch.cuda.is_available(), 
+                drop_last=True  # Ensure all batches have exact batch_size
             )
             
             val_loader = DataLoader(
@@ -297,7 +298,8 @@ def create_data_loaders(
                 shuffle=shuffle,
                 num_workers=num_workers,
                 generator=generator,
-                pin_memory=torch.cuda.is_available()
+                pin_memory=torch.cuda.is_available(),
+                drop_last=True  # Ensure all batches have exact batch_size
             )
             val_loader = None
 

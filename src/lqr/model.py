@@ -257,7 +257,8 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         self.coef_ = None
         self.intercept_ = None
         self.n_features_in_ = None
-    
+        self.prefit_ar = True
+
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'QuantileRegressor':
         """Fit the quantile regressor.
         
@@ -304,6 +305,14 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
             init[0] = np.median(y)
         else:
             init = np.zeros(p, dtype=np.float64)
+
+        if self.prefit_ar:
+            if self.fit_intercept:
+                beta = rq_fnm(X[:,:2], y, self.quantile)          
+                init[:2] = beta
+            else:
+                beta = rq_fnm(X[:,:1], y, self.quantile)
+                init[0] = beta[0]
    
         result = minimize(
             fun=pinball_loss,      # keep your existing function

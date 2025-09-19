@@ -26,6 +26,7 @@ class PinballLoss(nn.Module):
         super().__init__()
         self.quantiles = quantiles
 
+    @torch.compile
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor, ensemble: bool = False) -> torch.Tensor:
         """
         Pinball loss (a.k.a. quantile loss), vectorized.
@@ -138,6 +139,7 @@ class EnsembleNNTrainer:
         else:
             raise ValueError(f"Unknown optimizer: {optimizer_type}")
     
+    @torch.compile
     def train_epoch(
         self,
         train_loaders: List[DataLoader],
@@ -157,12 +159,10 @@ class EnsembleNNTrainer:
         pbar = zip(*train_loaders)
 
         for batches in pbar:
-            features_list, targets_list, country_codes_list = zip(*batches)
-            
-            # Stack features and targets from different data loaders - different batch for each model
-            features = torch.stack([f.to(self.device) for f in features_list])  # (n_models, batch_size, input_dim)
-            targets = torch.stack([t.to(self.device) for t in targets_list])    # (n_models, batch_size, n_quantiles, n_horizons)
-            country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])  # (n_models, batch_size)
+            # Replace the selected lines with this direct approach:
+            features = torch.stack([batch[0] for batch in batches])  # (n_models, batch_size, input_dim)
+            targets = torch.stack([batch[1] for batch in batches])    # (n_models, batch_size, n_quantiles, n_horizons)
+            country_codes = torch.stack([batch[2] for batch in batches])  # (n_models, batch_size)
 
             optimizer.zero_grad()
 
@@ -179,7 +179,7 @@ class EnsembleNNTrainer:
         
         return total_loss / n_batches if n_batches > 0 else 0.0
     
-
+    @torch.compile
     def validate(self, val_loaders: List[DataLoader]) -> List[float]:
         self.model.eval()
         total_losses = torch.zeros(self.model.n_models, device=self.device)
@@ -187,10 +187,10 @@ class EnsembleNNTrainer:
 
         with torch.no_grad():
             for batches in zip(*val_loaders):
-                features_list, targets_list, country_codes_list = zip(*batches)
-                features = torch.stack([f.to(self.device) for f in features_list])
-                targets  = torch.stack([t.to(self.device) for t in targets_list])
-                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
+                # Replace the selected lines with this direct approach:
+                features = torch.stack([batch[0] for batch in batches])  # (n_models, batch_size, input_dim)
+                targets = torch.stack([batch[1] for batch in batches])    # (n_models, batch_size, n_quantiles, n_horizons)
+                country_codes = torch.stack([batch[2] for batch in batches])  # (n_models, batch_size)
 
                 preds = self.model(features, country_codes, return_ensemble=True)  # (E,B,Q,H)
 
@@ -221,10 +221,10 @@ class EnsembleNNTrainer:
 
         with torch.no_grad():
             for batches in zip(*val_loaders):
-                features_list, targets_list, country_codes_list = zip(*batches)
-                features = torch.stack([f.to(self.device) for f in features_list])
-                targets  = torch.stack([t.to(self.device) for t in targets_list])
-                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
+                # Replace the selected lines with this direct approach:
+                features = torch.stack([batch[0] for batch in batches])
+                targets = torch.stack([batch[1] for batch in batches])
+                country_codes = torch.stack([batch[2] for batch in batches])
 
                 preds = baseline_model(features, country_codes, return_ensemble=True)
                   # reuse PinballLoss math but keep per-E means
@@ -282,12 +282,10 @@ class EnsembleNNTrainer:
         all_baseline_residuals = []
         with torch.no_grad():
             for batches in zip(*val_loaders):
-                features_list, targets_list, country_codes_list = zip(*batches)
-                features = torch.stack([f.to(self.device) for f in features_list])
-                targets  = torch.stack([t.to(self.device) for t in targets_list])
-                country_codes = torch.stack([cc.to(self.device) for cc in country_codes_list])
+                features = torch.stack([batch[0] for batch in batches])
+                targets = torch.stack([batch[1] for batch in batches])
+                country_codes = torch.stack([batch[2] for batch in batches])
 
-               
                 baseline_preds = baseline_model(features, country_codes, return_ensemble=True)
                 baseline_residuals = self.loss_array(baseline_preds*4, targets*4).cpu().numpy()
                 all_baseline_residuals.append(baseline_residuals)
@@ -300,7 +298,7 @@ class EnsembleNNTrainer:
         baseline_output_mean = all_baseline_residuals.mean(axis=0)
 
         return baseline_output_mean, baseline_output_sd
-    @torch.compile
+
     def fit(
         self,
         train_loaders: List[DataLoader],

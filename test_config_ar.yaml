@@ -27,8 +27,8 @@ splits:
 runtime:
   allow_reload: false                  # load existing model if present
   retrain_if_exists: false             # force retrain if model already exists
-  num_workers: 6                       # hint for how many workers will be working
-  batch_size: 60                       # INCREASED: number of tasks to claim and process per batch
+  num_workers: 24                       # hint for how many workers will be working
+  batch_size: 100                       # INCREASED: number of tasks to claim and process per batch
   max_ram_gb: 30.0                      # or specify float
   safety_ram_fraction: 0.8             # fraction of total RAM usable
   mem_probe_fudge_mb: 200              # extra margin on top of probe
@@ -62,7 +62,7 @@ models:
       - name: T142
         params:
           solver: pinball
-          alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80]
+          alphas: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90,95, 100, 105, 110, 115, 120]
           use_cv: true
           cv_splits: 10
 
