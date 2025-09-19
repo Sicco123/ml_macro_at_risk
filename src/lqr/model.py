@@ -289,7 +289,6 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
         # If no regularization, use linear programming approach
         if self.alpha == 0.0:
             if self.fit_intercept:
-                # Add intercept column
                 X_with_intercept = np.column_stack([np.ones(X.shape[0]), X])
                 coef_with_intercept = rq_fnm(X_with_intercept, y, self.quantile)
                 self.intercept_ = coef_with_intercept[0]
@@ -308,11 +307,13 @@ class QuantileRegressor(BaseEstimator, RegressorMixin):
 
         if self.prefit_ar:
             if self.fit_intercept:
-                beta = rq_fnm(X[:,:2], y, self.quantile)          
-                init[:2] = beta
+                X_with_intercept = np.column_stack([np.ones(X.shape[0]), X[:,0:1]])
+                coef_with_intercept = rq_fnm(X_with_intercept, y, self.quantile)
+                init[:2] = coef_with_intercept
             else:
-                beta = rq_fnm(X[:,:1], y, self.quantile)
-                init[0] = beta[0]
+                coef = rq_fnm(X[:,0:1], y, self.quantile)
+                init[:1] = coef
+    
    
         result = minimize(
             fun=pinball_loss,      # keep your existing function
