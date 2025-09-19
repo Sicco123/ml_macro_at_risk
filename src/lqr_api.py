@@ -273,8 +273,7 @@ class LQR:
             self.is_fitted = True
             
             #logger.info("LQR model fitted successfully")
-            # print first two coefs
-            print(coef_df.head(2))
+
 
             return coef_df
         
